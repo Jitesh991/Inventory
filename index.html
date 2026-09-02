@@ -96,6 +96,7 @@ button{cursor:pointer}
 .savestate.saving{color:var(--brass);background:var(--brass-soft)}
 .savestate.dirty{color:var(--brass);background:var(--brass-soft)}
 .savestate.error{color:var(--terra);background:var(--terra-soft);border-color:var(--terra)}
+.savestate.local{color:var(--ink-2);background:var(--porcelain);border-color:var(--line-2)}
 .find{width:150px;padding:7px 10px;border:1px solid var(--line-2);border-radius:7px;background:#fff;font-family:var(--mono);font-size:12px}
 .find:focus{outline:2px solid var(--king);outline-offset:-1px;border-color:var(--king)}
 
@@ -302,7 +303,6 @@ tbody tr:hover td{background:#faf7f4}
     <div class="top">
       <div class="tabs">
         <button data-tab="map" class="on">Map</button>
-        <button data-tab="entry">Bulk entry</button>
         <button data-tab="catalog">Catalog</button>
         <button data-tab="scan">Scan</button>
         <button data-tab="inv">Inventory</button>
@@ -311,11 +311,9 @@ tbody tr:hover td{background:#faf7f4}
       </div>
       <div class="spacer"></div>
       <span class="savestate saved" id="savestate">Saved</span>
-      <div class="stat" id="hint"></div>
       <input class="find" id="find" placeholder="find A12.4 / NEST">
     </div>
     <div class="canvas" id="canvas"></div>
-    <div class="panel hidden" id="p-entry"></div>
     <div class="panel hidden" id="p-catalog"></div>
     <div class="panel hidden" id="p-scan"></div>
       <div class="panel hidden" id="p-inv"></div>
@@ -335,27 +333,44 @@ tbody tr:hover td{background:#faf7f4}
    persistence. Saves are debounced, and the indicator in the top
    bar is the only place that reports on them.
    ============================================================ */
+const LKEY='sii-warehouse-map';
+
+/* Where saves are going. Decided on the first load and then left alone.
+     server — /api/state answered, so this is the deployed copy
+     local  — no API (the file was opened directly), so the browser keeps it */
+let MODE=null;
+
 async function loadSaved(){
   try{
     const r=await fetch('/api/state',{cache:'no-store'});
+    if(r.status===404) throw new Error('no-api');
     if(!r.ok) throw new Error('HTTP '+r.status);
     const j=await r.json();
+    MODE='server';
+    saveState('saved');
     return j && j.state ? j.state : null;
   }catch(e){
-    saveState('error','Could not load. '+e.message);
-    return null;
+    // A file opened from disk, or a deploy without the function, behaves the
+    // same way: keep working, save to this browser, and say so plainly rather
+    // than flashing a red failure at someone who has done nothing wrong.
+    MODE='local';
+    saveState('local');
+    try{ return JSON.parse(localStorage.getItem(LKEY)||'null'); }catch(_){ return null; }
   }
 }
 
-/* Saving is deliberately dumb: last write wins. One person editing at
-   a time is the assumption — see the note in the README. */
 let saveTimer=null, saving=false, pending=false;
 function save(){
   clearTimeout(saveTimer);
-  saveState('dirty');
+  if(MODE!=='local') saveState('dirty');
   saveTimer=setTimeout(flush,600);
 }
 async function flush(){
+  if(MODE==='local'){
+    try{ localStorage.setItem(LKEY,JSON.stringify(S)); saveState('local'); }
+    catch(e){ saveState('error','This browser refused to store it: '+e.message); }
+    return;
+  }
   if(saving){ pending=true; return; }
   saving=true;
   saveState('saving');
@@ -367,7 +382,7 @@ async function flush(){
     });
     if(!r.ok){
       const t=await r.text().catch(()=>'');
-      throw new Error('HTTP '+r.status+(t?' — '+t.slice(0,120):''));
+      throw new Error('HTTP '+r.status+(t?' — '+t.slice(0,140):''));
     }
     saveState('saved');
   }catch(e){
@@ -377,23 +392,27 @@ async function flush(){
     if(pending){ pending=false; flush(); }
   }
 }
-/* Leaving with an unsent change is the one failure worth interrupting for. */
+/* Only worth interrupting for when a real save is still outstanding. */
 window.addEventListener('beforeunload',e=>{
-  if(saveTimer&&document.getElementById('savestate')?.dataset.s==='dirty'){
+  if(MODE==='server'&&document.getElementById('savestate')?.dataset.s==='dirty'){
     e.preventDefault(); e.returnValue='';
   }
 });
 
-function saveState(s,msg){
+function saveState(st,msg){
   const el=document.getElementById('savestate');
   if(!el) return;
-  el.dataset.s=s;
-  el.textContent = s==='saved' ? 'Saved'
-    : s==='saving' ? 'Saving…'
-    : s==='dirty' ? 'Unsaved'
+  el.dataset.s=st;
+  el.textContent = st==='saved' ? 'Saved'
+    : st==='saving' ? 'Saving…'
+    : st==='dirty'  ? 'Unsaved'
+    : st==='local'  ? 'This browser only'
     : 'Not saved';
-  el.title = msg || (s==='error' ? 'The last save failed.' : '');
-  el.className = 'savestate ' + s;
+  el.title = msg || (
+    st==='local' ? 'No server storage reachable, so changes are kept in this browser. '
+      + 'Deploy to Vercel with a Blob store to share them.'
+    : st==='error' ? 'The last save failed.' : '');
+  el.className = 'savestate ' + st;
 }
 
 /* ============================================================
@@ -5429,10 +5448,6 @@ function renderRail(){
 function syncTool(){
   document.querySelectorAll('.tool button').forEach(b=>b.classList.toggle('on',b.dataset.mode===mode));
   document.body.classList.toggle('structure',mode==='structure');
-  $('#hint').textContent = mode==='structure'
-    ? 'Click a cell to add or remove the slot'
-    : mode==='erase' ? 'Click or drag to clear cells'
-    : active ? 'Painting ' + active : 'Pick a brand on the left';
 }
 
 /* ============================================================
@@ -5695,10 +5710,11 @@ function editBrand(b){
    Bulk entry
    ============================================================ */
 function renderEntry(){
-  $('#p-entry').innerHTML=`
-  <h2>Bulk entry</h2>
-  <p class="lead">Two ways in. Upload a spreadsheet of locations and brands, or type a rack sheet
-  the way it is written on paper. Both check before they save.</p>
+  const host=$('#entry-host');
+  if(!host) return;
+  host.innerHTML=`
+  <p class="lead" style="margin-top:0">Two ways in. Upload a spreadsheet of locations and brands, or type a
+  rack sheet the way it is written on paper. Both check before they save.</p>
 
   <div class="card">
     ${importerMarkup('e',{
@@ -6777,6 +6793,7 @@ function renderSummary(){
 /* ============================================================
    Rack setup
    ============================================================ */
+let entryOpen=false;
 function renderRacks(){
   const rs=Object.keys(S.racks).sort(sortRacks);
   $('#p-racks').innerHTML=`
@@ -6793,6 +6810,16 @@ function renderRacks(){
     </div>
     <p class="mini" style="color:var(--ink-2)">Creating a rack that already exists extends it — existing slots and brands stay put.</p>
   </div>
+  <div class="card" style="padding-top:16px;padding-bottom:16px">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Bulk assign brands to slots</h3>
+      <span style="font-size:12.5px;color:var(--ink-2)">Import a rack sheet — locations and the brand in each.</span>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="entry-toggle">${entryOpen?'Close':'Open'}</button>
+    </div>
+    <div id="entry-host" class="${entryOpen?'':'hidden'}" style="margin-top:16px"></div>
+  </div>
+
   <div class="card">
     <h3>Racks in this map</h3>
     ${rs.length?`<table><thead><tr><th>Rack</th><th class="num">Bays</th><th class="num">Slots</th><th></th></tr></thead><tbody>
@@ -6803,6 +6830,14 @@ function renderRacks(){
       <td style="text-align:right"><button class="btn ghost" data-del="${r}" style="padding:3px 9px"${isLocked(r)?' disabled':''}>Delete</button></td></tr>`;}).join('')}
     </tbody></table>`:'<p class="lead" style="margin:0">No racks yet.</p>'}
   </div>`;
+
+  $('#entry-toggle').onclick=()=>{
+    entryOpen=!entryOpen;
+    $('#entry-host').classList.toggle('hidden',!entryOpen);
+    $('#entry-toggle').textContent=entryOpen?'Close':'Open';
+    if(entryOpen) renderEntry();
+  };
+  if(entryOpen) renderEntry();
 
   $('#r-add').onclick=()=>{
     const id=$('#r-id').value.trim().toUpperCase();
@@ -6907,7 +6942,6 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
   const t=b.dataset.tab;
   $('#canvas').classList.toggle('hidden',t!=='map');
-  $('#p-entry').classList.toggle('hidden',t!=='entry');
   $('#p-catalog').classList.toggle('hidden',t!=='catalog');
   $('#p-inv').classList.toggle('hidden',t!=='inv');
   $('#p-scan').classList.toggle('hidden',t!=='scan');
@@ -6915,7 +6949,6 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   $('#p-racks').classList.toggle('hidden',t!=='racks');
   $('#toolsec').style.display = t==='map'?'':'none';
   if(t!=='scan'&&camStream){ camStream.getTracks().forEach(x=>x.stop()); camStream=null; }
-  if(t==='entry') renderEntry();
   if(t==='catalog') renderCatalog();
   if(t==='inv') renderInv();
   if(t==='scan') renderScan();
