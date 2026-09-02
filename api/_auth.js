@@ -1,4 +1,4 @@
-import { put, list } from '@vercel/blob';
+import { put, list, head } from '@vercel/blob';
 import { scryptSync, randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
 
 /**
@@ -20,6 +20,49 @@ const USERS_PATH = 'warehouse/users.json';
  * second store, or set a prefix, and it becomes MYSTORE_READ_WRITE_TOKEN — so
  * any variable ending that way is accepted rather than insisting on one name.
  */
+/**
+ * Whether the store is private. A private store rejects access:'public' outright,
+ * and a public one rejects 'private', so this is not a preference — it has to
+ * match how the store was created. Set BLOB_ACCESS=public if yours is public.
+ */
+export const blobAccess = () =>
+  (process.env.BLOB_ACCESS || 'private') === 'public' ? 'public' : 'private';
+
+/**
+ * Read a blob's contents.
+ *
+ * A public blob can be fetched from its url directly. A private one cannot —
+ * the url is not world-readable — so head() is used to mint a signed download
+ * url first. Written to work either way rather than assuming.
+ */
+export async function readBlob(pathname) {
+  const token = blobToken();
+  const { blobs } = await list({ prefix: pathname, limit: 1, token });
+  const hit = blobs.find(b => b.pathname === pathname);
+  if (!hit) return null;
+
+  let url = hit.downloadUrl || hit.url;
+  try {
+    const meta = await head(hit.url, { token });
+    url = meta.downloadUrl || meta.url || url;
+  } catch { /* public stores need no signing; fall through with the plain url */ }
+
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`Could not read ${pathname} (HTTP ${r.status})`);
+  return await r.json();
+}
+
+export async function writeBlob(pathname, data) {
+  return put(pathname, JSON.stringify(data, null, 2), {
+    token: blobToken(),
+    access: blobAccess(),
+    contentType: 'application/json',
+    addRandomSuffix: false,
+    allowOverwrite: true,
+    cacheControlMaxAge: 0
+  });
+}
+
 export function blobToken() {
   if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN;
   const key = Object.keys(process.env).find(k => /_READ_WRITE_TOKEN$/.test(k) && process.env[k]);
@@ -93,23 +136,11 @@ export function readToken(token) {
 /* ---------------------------- user store --------------------------- */
 
 export async function loadUsers() {
-  const { blobs } = await list({ prefix: USERS_PATH, limit: 1, token: blobToken() });
-  const hit = blobs.find(b => b.pathname === USERS_PATH);
-  if (!hit) return [];
-  const r = await fetch(hit.url, { cache: 'no-store' });
-  if (!r.ok) throw new Error(`Could not read the user list (HTTP ${r.status})`);
-  return await r.json();
+  return (await readBlob(USERS_PATH)) || [];
 }
 
 export async function saveUsers(users) {
-  await put(USERS_PATH, JSON.stringify(users, null, 2), {
-    token: blobToken(),
-    access: 'public',
-    contentType: 'application/json',
-    addRandomSuffix: false,
-    allowOverwrite: true,
-    cacheControlMaxAge: 0
-  });
+  await writeBlob(USERS_PATH, users);
 }
 
 /** The signed-in user for a request, re-read from the store so a disabled
