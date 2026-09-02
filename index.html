@@ -97,6 +97,34 @@ button{cursor:pointer}
 .savestate.dirty{color:var(--brass);background:var(--brass-soft)}
 .savestate.error{color:var(--terra);background:var(--terra-soft);border-color:var(--terra)}
 .savestate.local{color:var(--ink-2);background:var(--porcelain);border-color:var(--line-2)}
+
+/* ---------- the door ---------- */
+.gate{max-width:392px;margin:9vh auto 0;padding:0 20px;text-align:center}
+.gate.hidden{display:none}
+.gate-mark{width:56px;height:56px;margin:0 auto 18px;border-radius:14px;display:flex;
+  align-items:center;justify-content:center;font:600 19px var(--sans);color:#fff;letter-spacing:.04em;
+  background:linear-gradient(160deg,#ff9a5a,#dd3f2c)}
+.gate h1{font-size:29px;letter-spacing:-.025em;margin-bottom:6px}
+.gate-sub{color:var(--ink-2);font-size:14px;margin:0 0 26px}
+.gate-card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:26px 24px;text-align:left;box-shadow:0 1px 2px rgba(31,33,36,.04)}
+.gate-card label{display:block;font-size:11px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink-2);margin-bottom:7px}
+.gate-card input{width:100%;padding:11px 13px;font-size:15px;border:1px solid var(--line-2);
+  border-radius:7px;background:#fff}
+.gate-card input:focus{outline:2px solid var(--king);outline-offset:-1px;border-color:var(--king)}
+.gate-foot{margin:24px 0 40px;font-size:12.5px;color:var(--ink-3)}
+.app.hidden{display:none}
+/* A scanner reads the map; the editing furniture is not theirs. */
+body.scanner #toolsec,
+body.scanner #addbrand,
+body.scanner #recolor,
+body.scanner #reset,
+body.scanner #locktoggle,
+body.scanner #loadsheets,
+body.scanner #loadold,
+body.scanner .chip .del{display:none!important}
+body.scanner .cell{cursor:default}
 .find{width:150px;padding:7px 10px;border:1px solid var(--line-2);border-radius:7px;background:#fff;font-family:var(--mono);font-size:12px}
 .find:focus{outline:2px solid var(--king);outline-offset:-1px;border-color:var(--king)}
 
@@ -252,7 +280,33 @@ tbody tr:hover td{background:#faf7f4}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 
-<div class="app">
+<div id="gate" class="gate">
+  <div class="gate-mark">SII</div>
+  <h1 id="gateTitle">Warehouse</h1>
+  <p class="gate-sub" id="gateLede">Rack map and inventory</p>
+  <div class="gate-card">
+    <div id="setupFields" class="hidden">
+      <div class="note warn" style="margin-top:0">No accounts exist yet. Create the administrator
+        using the setup code from the project's environment variables.</div>
+      <label for="suToken">Setup code</label>
+      <input id="suToken" type="password" autocomplete="off">
+      <div style="margin-top:14px"><label for="suName">Full name</label>
+        <input id="suName" type="text" autocomplete="name"></div>
+      <div style="margin-top:14px"></div>
+    </div>
+    <label for="loginUser">User ID</label>
+    <input id="loginUser" type="text" autocomplete="username" autocapitalize="off" spellcheck="false">
+    <div style="margin-top:14px">
+      <label for="loginPass" id="passLabel">Password</label>
+      <input id="loginPass" type="password" autocomplete="current-password">
+    </div>
+    <div id="gateErr" class="note bad hidden"></div>
+    <button class="btn" id="gateGo" style="width:100%;margin-top:18px;padding:11px">Sign in</button>
+  </div>
+  <p class="gate-foot">Sign out when you are done with a shared terminal.</p>
+</div>
+
+<div class="app hidden">
   <aside class="rail">
     <div class="brandbar">
       <h1>Warehouse Brand Map</h1>
@@ -308,9 +362,16 @@ tbody tr:hover td{background:#faf7f4}
         <button data-tab="inv">Inventory</button>
         <button data-tab="summary">Dashboard</button>
         <button data-tab="racks">Rack setup</button>
+        <button data-tab="users">Users</button>
       </div>
       <div class="spacer"></div>
       <span class="savestate saved" id="savestate">Saved</span>
+      <div style="text-align:right;line-height:1.2">
+        <div id="whoName" style="font-size:12.5px;font-weight:600"></div>
+        <div id="whoRole" class="mono" style="font-size:10px;color:var(--ink-3)"></div>
+      </div>
+      <button class="btn quiet" id="btnPass" style="padding:5px 10px;font-size:12px">Password</button>
+      <button class="btn quiet" id="btnOut" style="padding:5px 10px;font-size:12px">Sign out</button>
       <input class="find" id="find" placeholder="find A12.4 / NEST">
     </div>
     <div class="canvas" id="canvas"></div>
@@ -319,6 +380,7 @@ tbody tr:hover td{background:#faf7f4}
       <div class="panel hidden" id="p-inv"></div>
       <div class="panel hidden" id="p-summary"></div>
     <div class="panel hidden" id="p-racks"></div>
+    <div class="panel hidden" id="p-users"></div>
   </div>
 </div>
 <div class="tip" id="tip"></div>
@@ -333,86 +395,166 @@ tbody tr:hover td{background:#faf7f4}
    persistence. Saves are debounced, and the indicator in the top
    bar is the only place that reports on them.
    ============================================================ */
-const LKEY='sii-warehouse-map';
+/* ============================================================
+   Session and storage.
 
-/* Where saves are going. Decided on the first load and then left alone.
-     server — /api/state answered, so this is the deployed copy
-     local  — no API (the file was opened directly), so the browser keeps it */
-let MODE=null;
+   Everything server-side goes through api(), which attaches the
+   session token and bounces back to the sign-in screen the moment
+   the server says the session is gone.
+   ============================================================ */
+let SESSION = sessionStorage.getItem('wh-session') || '';
+let ME = null;
+let ROLES = [];
+const isAdmin = () => ME?.role === 'admin';
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    cache: 'no-store',
+    ...opts,
+    headers: { 'Content-Type': 'application/json', 'x-session': SESSION, ...(opts.headers || {}) }
+  });
+  const body = await r.json().catch(() => ({}));
+  if (r.status === 401 && body.reauth) { signOut('Your session expired. Sign in again.'); throw new Error('Session expired'); }
+  if (!r.ok) throw new Error(body.error || `Request failed (${r.status})`);
+  return body;
+}
 
 async function loadSaved(){
   try{
-    const r=await fetch('/api/state',{cache:'no-store'});
-    if(r.status===404) throw new Error('no-api');
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const j=await r.json();
-    MODE='server';
+    const j = await api('/api/state');
     saveState('saved');
-    return j && j.state ? j.state : null;
+    return j.state || null;
   }catch(e){
-    // A file opened from disk, or a deploy without the function, behaves the
-    // same way: keep working, save to this browser, and say so plainly rather
-    // than flashing a red failure at someone who has done nothing wrong.
-    MODE='local';
-    saveState('local');
-    try{ return JSON.parse(localStorage.getItem(LKEY)||'null'); }catch(_){ return null; }
+    saveState('error', e.message);
+    return null;
   }
 }
 
 let saveTimer=null, saving=false, pending=false;
 function save(){
   clearTimeout(saveTimer);
-  if(MODE!=='local') saveState('dirty');
+  saveState('dirty');
   saveTimer=setTimeout(flush,600);
 }
 async function flush(){
-  if(MODE==='local'){
-    try{ localStorage.setItem(LKEY,JSON.stringify(S)); saveState('local'); }
-    catch(e){ saveState('error','This browser refused to store it: '+e.message); }
-    return;
-  }
   if(saving){ pending=true; return; }
   saving=true;
   saveState('saving');
   try{
-    const r=await fetch('/api/state',{
-      method:'PUT',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(S)
-    });
-    if(!r.ok){
-      const t=await r.text().catch(()=>'');
-      throw new Error('HTTP '+r.status+(t?' — '+t.slice(0,140):''));
-    }
-    saveState('saved');
+    const out = await api('/api/state', { method:'PUT', body: JSON.stringify(S) });
+    // The server reverts anything a scanner is not allowed to change, and says
+    // which parts. Silently accepting the write would leave the screen showing
+    // edits that were never stored.
+    if(out.guarded && out.guarded.length){
+      saveState('saved');
+      toast('Saved, but rack layout changes were not — that needs an administrator.');
+      const fresh = await api('/api/state');
+      if(fresh.state){ S = fresh.state; commitLocal(); }
+    } else saveState('saved');
   }catch(e){
-    saveState('error',e.message);
+    saveState('error', e.message);
   }finally{
     saving=false;
     if(pending){ pending=false; flush(); }
   }
 }
-/* Only worth interrupting for when a real save is still outstanding. */
+/** Redraw from S without writing back. */
+function commitLocal(){ renderRail(); renderMap(); renderSummary(); }
+
 window.addEventListener('beforeunload',e=>{
-  if(MODE==='server'&&document.getElementById('savestate')?.dataset.s==='dirty'){
-    e.preventDefault(); e.returnValue='';
-  }
+  if(document.getElementById('savestate')?.dataset.s==='dirty'){ e.preventDefault(); e.returnValue=''; }
 });
 
 function saveState(st,msg){
   const el=document.getElementById('savestate');
   if(!el) return;
   el.dataset.s=st;
-  el.textContent = st==='saved' ? 'Saved'
-    : st==='saving' ? 'Saving…'
-    : st==='dirty'  ? 'Unsaved'
-    : st==='local'  ? 'This browser only'
-    : 'Not saved';
-  el.title = msg || (
-    st==='local' ? 'No server storage reachable, so changes are kept in this browser. '
-      + 'Deploy to Vercel with a Blob store to share them.'
-    : st==='error' ? 'The last save failed.' : '');
+  el.textContent = st==='saved' ? 'Saved' : st==='saving' ? 'Saving…'
+    : st==='dirty' ? 'Unsaved' : 'Not saved';
+  el.title = msg || (st==='error' ? 'The last save failed.' : '');
   el.className = 'savestate ' + st;
+}
+
+/* ------------------------------ the door ---------------------------- */
+let setupMode = false;
+
+function gateError(msg){
+  const e=document.getElementById('gateErr');
+  e.textContent=msg; e.classList.remove('hidden');
+}
+
+async function showGate(){
+  document.querySelector('.app').classList.add('hidden');
+  document.getElementById('gate').classList.remove('hidden');
+  try{
+    const r = await fetch('/api/auth', { cache:'no-store', headers:{ 'x-session': SESSION } });
+    const info = await r.json();
+    ROLES = info.roles || [];
+    setupMode = Boolean(info.needsSetup);
+    if(info.error) gateError(info.error);
+  }catch{ setupMode=false; }
+  document.getElementById('setupFields').classList.toggle('hidden', !setupMode);
+  document.getElementById('gateTitle').textContent = setupMode ? 'First-time setup' : 'Warehouse';
+  document.getElementById('gateLede').textContent = setupMode
+    ? 'Choose the administrator user ID and password.' : 'Rack map and inventory';
+  document.getElementById('passLabel').textContent = setupMode ? 'Choose a password' : 'Password';
+  document.getElementById('gateGo').textContent = setupMode ? 'Create administrator' : 'Sign in';
+  document.getElementById('loginUser').focus();
+}
+
+function signOut(message){
+  SESSION=''; ME=null;
+  sessionStorage.removeItem('wh-session');
+  showGate().then(()=>{ if(message) gateError(message); });
+}
+
+async function doSignIn(){
+  document.getElementById('gateErr').classList.add('hidden');
+  const username=document.getElementById('loginUser').value.trim();
+  const password=document.getElementById('loginPass').value;
+  if(!username||!password){ gateError('Enter a user ID and password.'); return; }
+  const btn=document.getElementById('gateGo');
+  btn.disabled=true;
+  try{
+    const body = setupMode
+      ? { action:'bootstrap', setupToken:document.getElementById('suToken').value,
+          username, password, name:document.getElementById('suName').value }
+      : { action:'login', username, password };
+    const r=await fetch('/api/auth',{ method:'POST', cache:'no-store',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const out=await r.json().catch(()=>({}));
+    if(!r.ok){ gateError(out.error||`Sign-in failed (${r.status})`); return; }
+    SESSION=out.token; ME=out.user; ROLES=out.roles||ROLES;
+    sessionStorage.setItem('wh-session',SESSION);
+    document.getElementById('loginPass').value='';
+    await enterApp();
+  }catch(e){ gateError(e.message); }
+  finally{ btn.disabled=false; }
+}
+
+/** Which tabs each role may open. The server enforces the rest. */
+const TAB_ROLES = { racks:'admin', users:'admin' };
+
+async function enterApp(){
+  document.getElementById('gate').classList.add('hidden');
+  document.querySelector('.app').classList.remove('hidden');
+  document.getElementById('whoName').textContent = ME?.name || ME?.username || '';
+  document.getElementById('whoRole').textContent =
+    (ROLES.find(r=>r.id===ME?.role)?.label || ME?.role || '').toUpperCase();
+
+  let first=null;
+  document.querySelectorAll('.tabs button').forEach(b=>{
+    const need=TAB_ROLES[b.dataset.tab];
+    const ok = !need || ME?.role===need;
+    b.style.display = ok ? '' : 'none';
+    if(ok && !first) first=b;
+  });
+  // A scanner reads the map but does not paint it, so the whole tool section
+  // and the brand add/delete controls go away rather than failing on save.
+  document.body.classList.toggle('scanner', !isAdmin());
+
+  await boot();
+  if(first) first.click();
 }
 
 /* ============================================================
@@ -5579,6 +5721,7 @@ function cellEl(r,b,l){
    Painting
    ============================================================ */
 function apply(loc){
+  if(!isAdmin()) return;
   const rk=(loc.match(/^[A-Z]+/)||[''])[0];
   if(isLocked(rk)) return;
   if(mode==='erase'){ delete S.assign[loc]; return; }
@@ -5931,7 +6074,11 @@ function takeScan(raw){
     note=`<div class="hit-note">This slot has no brand set. Recorded anyway.</div>`;
   if(created) note+=`<div class="hit-note">Slot ${loc} did not exist and was created.</div>`;
 
-  showHit(`<div class="hit-sku">${esc(rec.sku)}</div>
+  const pic=(catInfo(rec.sku)||{}).imageUrl;
+  showHit(`${pic?`<img src="${esc(pic)}" alt="" onerror="this.style.display='none'"
+      style="float:right;width:64px;height:64px;object-fit:contain;border-radius:6px;
+      background:#fff;border:1px solid var(--line);margin-left:12px">`:''}
+    <div class="hit-sku">${esc(rec.sku)}</div>
     <div class="hit-meta">
       <span>${esc(rec.brand||'no brand')}</span>
       <span>${loc}</span>
@@ -6272,10 +6419,11 @@ const CAT_FIELDS = {
   brand:   ['brand','brandname','sl','subbrand'],
   packing: ['packing','packingqty','pack','packsize','pcspercarton','pcsctn','pcsperctn',
             'qtypercarton','pcsperbox','qtyperbox','innerqty'],
-  qty:     ['qty','quantity','total','totalqty','pieces','pcs','onhand','stock','balance']
+  qty:     ['qty','quantity','total','totalqty','pieces','pcs','onhand','stock','balance'],
+  imageUrl:['image','imageurl','imagelink','photo','picture','img','imgurl','thumbnail']
 };
 const CAT_LABEL = { sku:'SKU', upc:'UPC / barcode', brand:'Brand',
-  packing:'Packing (pcs per carton)', qty:'Qty' };
+  packing:'Packing (pcs per carton)', qty:'Qty', imageUrl:'Image URL' };
 
 function commitCatalog(rows,{dryRun}){
   const rejected=[], warnings=[], clean=[], seen=new Map();
@@ -6295,7 +6443,10 @@ function commitCatalog(rows,{dryRun}){
     if(dupe) notes.push(`same SKU also on ${dupe} — kept as a separate batch`);
     seen.set(sku.toUpperCase(),rowRef);
     if(notes.length) warnings.push({rowRef,key:sku,notes});
-    clean.push({id:newCatId(),upc,sku,brand,packing,qty:qty===null?0:qty,loc:''});
+    const imageUrl=String(r.imageUrl??'').trim();
+    if(imageUrl&&!/^https?:\/\//i.test(imageUrl)) notes.push('image URL ignored — it must start with http');
+    clean.push({id:newCatId(),upc,sku,brand,packing,qty:qty===null?0:qty,
+      imageUrl:/^https?:\/\//i.test(imageUrl)?imageUrl:'',loc:''});
   });
   const summary={ rowsReceived:rows.length, accepted:clean.length, rejected:rejected.length,
     warnings:warnings.length, linesAfter:(replace?0:(S.catLines||[]).length)+clean.length };
@@ -6318,7 +6469,7 @@ function commitCatalog(rows,{dryRun}){
 const catImporter = makeImporter({
   fields:CAT_FIELDS, labels:CAT_LABEL, required:['sku'], wanted:['qty'],
   ids: importerIds('c'),
-  ignoreNote:'This tool only takes UPC, SKU, brand, packing and qty.',
+  ignoreNote:'This tool only takes UPC, SKU, brand, packing, qty and an image URL.',
   commitLabel:'Save to catalog',
   commit: commitCatalog,
   stats: s => [['Rows read',s.rowsReceived],['Accepted',s.accepted],
@@ -6407,18 +6558,112 @@ const assignImporter = makeImporter({
 
 function catRow(l){
   const loc=l.loc;
-  return `<tr><td style="font-family:var(--mono)">${esc(l.sku)}</td>
+  const thumb = l.imageUrl
+    ? `<img src="${esc(l.imageUrl)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'"
+        style="width:34px;height:34px;object-fit:contain;border-radius:5px;background:#fff;border:1px solid var(--line)">`
+    : `<span style="display:inline-block;width:34px;height:34px;border-radius:5px;border:1px dashed var(--line-2)"></span>`;
+  return `<tr>
+    <td>${thumb}</td>
+    <td style="font-family:var(--mono)">${esc(l.sku)}</td>
     <td class="mono" style="font-size:12px;color:var(--ink-2)">${esc(l.upc||'—')}</td>
     <td>${l.brand?`<span class="dot" style="background:${colorOf(l.brand)}"></span>${esc(l.brand)}`:'—'}</td>
     <td class="num">${l.packing!=null?l.packing:'—'}</td>
     <td class="num">${(+l.qty||0).toLocaleString()}</td>
     <td style="font-family:var(--mono)">${loc?esc(loc):'<span style="color:var(--ink-2)">unplaced</span>'}</td>
     <td style="text-align:right;white-space:nowrap">
-      ${loc?`<button class="btn ghost" data-place="${l.id}" style="padding:2px 8px">Change</button>
-             <button class="btn ghost" data-unplace="${l.id}" style="padding:2px 8px">Remove</button>`
-           :`<button class="btn ghost" data-place="${l.id}" style="padding:2px 8px">+ Location</button>`}
+      <button class="btn ghost" data-cedit="${l.id}" style="padding:2px 8px">Edit</button>
+      ${loc?`<button class="btn quiet" data-place="${l.id}" style="padding:2px 8px">Move</button>
+             <button class="btn quiet" data-unplace="${l.id}" style="padding:2px 8px">Remove</button>`
+           :`<button class="btn quiet" data-place="${l.id}" style="padding:2px 8px">+ Location</button>`}
     </td></tr>`;
 }
+
+/* ---- editing one SKU, in the shape Reorder uses: a form card above the
+   table, with a live image preview and the location shown read-only since
+   it is changed with the Move button. ---- */
+let editingCat=null;
+
+function openCatEditor(id){
+  const l=(S.catLines||[]).find(x=>x.id===id);
+  if(!l) return;
+  editingCat=id;
+  const host=$('#c-editor');
+  host.classList.remove('hidden');
+  host.innerHTML=`
+    <h3 id="ce-title">Edit ${esc(l.sku)}</h3>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+      <div><label>SKU</label><input type="text" id="ce-sku" value="${esc(l.sku)}" style="width:100%"></div>
+      <div><label>UPC / barcode</label><input type="text" id="ce-upc" value="${esc(l.upc||'')}" inputmode="numeric" style="width:100%"></div>
+      <div><label>Brand</label><input type="text" id="ce-brand" value="${esc(l.brand||'')}" list="ce-brands" style="width:100%;text-transform:uppercase">
+        <datalist id="ce-brands">${S.brands.map(b=>`<option value="${esc(b.name)}">`).join('')}</datalist></div>
+      <div><label>Packing (pcs per carton)</label><input type="number" id="ce-packing" min="1" value="${l.packing??''}" style="width:100%"></div>
+      <div><label>Qty</label><input type="number" id="ce-qty" min="0" value="${+l.qty||0}" style="width:100%"></div>
+      <div><label>Location</label><input type="text" value="${esc(l.loc||'unplaced')}" readonly
+        style="width:100%;background:var(--porcelain);color:var(--ink-2)"></div>
+    </div>
+    <div style="margin-top:14px;display:grid;grid-template-columns:1fr 104px;gap:14px;align-items:end">
+      <div><label>Image URL</label>
+        <input type="text" id="ce-img" value="${esc(l.imageUrl||'')}" placeholder="https://…" style="width:100%"></div>
+      <img id="ce-prev" alt="" style="width:104px;height:104px;object-fit:contain;border:1px solid var(--line-2);
+        border-radius:8px;background:#fff;display:none">
+    </div>
+    <div id="ce-err" class="note bad hidden"></div>
+    <div class="row">
+      <button class="btn" id="ce-save">Save</button>
+      <button class="btn quiet" id="ce-cancel">Cancel</button>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="ce-del" style="color:var(--terra)">Delete this line</button>
+    </div>`;
+
+  const preview=()=>{
+    const u=$('#ce-img').value.trim(), img=$('#ce-prev');
+    if(!/^https?:\/\//i.test(u)){ img.style.display='none'; return; }
+    img.src=u; img.style.display='block';
+    img.onerror=()=>{ img.style.display='none'; };
+  };
+  $('#ce-img').oninput=preview; preview();
+
+  $('#ce-cancel').onclick=closeCatEditor;
+  $('#ce-del').onclick=()=>{
+    if(!confirm(`Delete the catalog line for ${l.sku}?${l.loc?' Its stock at '+l.loc+' goes too.':''}`)) return;
+    removeCatPlacement(l);
+    S.catLines=S.catLines.filter(x=>x.id!==id);
+    closeCatEditor(); commit(); renderCatalogResults(); toast('Line deleted');
+  };
+  $('#ce-save').onclick=()=>{
+    const sku=$('#ce-sku').value.trim();
+    if(!sku){ $('#ce-err').textContent='A SKU is required.'; $('#ce-err').classList.remove('hidden'); return; }
+    const img=$('#ce-img').value.trim();
+    if(img&&!/^https?:\/\//i.test(img)){
+      $('#ce-err').textContent='The image URL must start with http:// or https://';
+      $('#ce-err').classList.remove('hidden'); return;
+    }
+    const brand=$('#ce-brand').value.trim().toUpperCase();
+    if(brand&&!brandOf(brand)) S.brands.push({name:brand,color:FALLBACK[S.brands.length%FALLBACK.length]});
+
+    l.sku=sku;
+    l.upc=$('#ce-upc').value.replace(/\D/g,'');
+    l.brand=brand;
+    l.packing=num($('#ce-packing').value);
+    l.qty=num($('#ce-qty').value)||0;
+    l.imageUrl=img;
+    // Stock already placed from this line follows the edit, so the map and the
+    // catalog cannot drift apart.
+    if(l.loc&&S.inv[l.loc]){
+      const line=S.inv[l.loc].find(x=>x._catId===l.id);
+      if(line){ line.sku=l.sku; line.packing=l.packing; line.qty=l.qty;
+        line.boxes=l.packing?+(l.qty/l.packing).toFixed(2):null; }
+    }
+    closeCatEditor(); commit(); renderCatalogResults(); toast(`${l.sku} saved`);
+  };
+  host?.scrollIntoView?.({block:'nearest'});
+}
+function closeCatEditor(){
+  editingCat=null;
+  const h=$('#c-editor');
+  if(h){ h.classList.add('hidden'); h.innerHTML=''; }
+}
+
 function startPlace(id){
   const line=(S.catLines||[]).find(x=>x.id===id); if(!line) return;
   const raw=prompt(`Location for ${line.sku}${line.brand?' — '+line.brand:''}`, line.loc||'');
@@ -6486,6 +6731,7 @@ function renderCatalog(){
     <h3>Search</h3>
     <input type="text" id="c-search" placeholder="SKU, UPC or brand" value="${esc(catQuery)}"
       style="width:100%;font-family:var(--mono);font-size:14px;margin-bottom:12px">
+    <div id="c-editor" class="card hidden" style="border-color:var(--king);margin-bottom:14px"></div>
     <div id="c-results"></div>
   </div>
 
@@ -6512,8 +6758,8 @@ function renderCatalog(){
   };
 
   $('#c-csv').onclick=()=>{
-    const rows=[['UPC','SKU','Brand','Packing','Qty','Location']];
-    (S.catLines||[]).forEach(l=>rows.push([l.upc||'',l.sku,l.brand||'',l.packing??'',l.qty||0,l.loc||'']));
+    const rows=[['UPC','SKU','Brand','Packing','Qty','Image URL','Location']];
+    (S.catLines||[]).forEach(l=>rows.push([l.upc||'',l.sku,l.brand||'',l.packing??'',l.qty||0,l.imageUrl||'',l.loc||'']));
     if(rows.length===1) return toast('Nothing in the catalog yet');
     const csv=rows.map(r=>r.map(v=>/[",]/.test(String(v))?`"${String(v).replace(/"/g,'""')}"`:v).join(',')).join('\n');
     download('catalog.csv',csv,'text/csv');
@@ -6538,20 +6784,137 @@ function renderCatalogResults(){
     const placed=filtered.filter(l=>l.loc);
     summary=`<div class="hit-card" style="margin-bottom:14px">
       <div class="hit-sku">${esc(any.sku)}</div>
-      <div class="hit-meta"><span>${esc(any.brand||'no brand')}</span><span>UPC ${esc(any.upc||'—')}</span><span>pack ${any.packing??'—'}</span></div>
+      <div class="hit-meta">${any.imageUrl?`<img src="${esc(any.imageUrl)}" alt="" loading="lazy"
+        onerror="this.style.display='none'" style="width:52px;height:52px;object-fit:contain;
+        border-radius:6px;background:#fff;border:1px solid var(--line)">`:''}
+        <span>${esc(any.brand||'no brand')}</span><span>UPC ${esc(any.upc||'—')}</span><span>pack ${any.packing??'—'}</span></div>
       <div class="hit-note">${filtered.length} line${filtered.length===1?'':'s'} · ${totalQ.toLocaleString()} pieces total${
         placed.length?` · at ${placed.map(l=>`${l.loc} (${(+l.qty||0).toLocaleString()})`).join(', ')}`:' · not placed on the map yet'}</div>
     </div>`;
   }
 
   container.innerHTML=summary+(filtered.length
-    ? `<table><thead><tr><th>SKU</th><th>UPC</th><th>Brand</th><th class="num">Pack</th><th class="num">Qty</th><th>Location</th><th></th></tr></thead>
+    ? `<table><thead><tr><th style="width:44px"></th><th>SKU</th><th>UPC</th><th>Brand</th><th class="num">Pack</th><th class="num">Qty</th><th>Location</th><th></th></tr></thead>
        <tbody>${filtered.slice(0,300).map(catRow).join('')}</tbody></table>
        ${filtered.length>300?`<p class="mini" style="color:var(--ink-2);margin-top:8px">Showing the first 300 of ${filtered.length} matches — narrow the search.</p>`:''}`
     : (lines.length?'<p class="lead" style="margin:0">No matches.</p>':'<p class="lead" style="margin:0">Import your list above to search it.</p>'));
 
+  container.querySelectorAll('[data-cedit]').forEach(b=>b.onclick=()=>openCatEditor(b.dataset.cedit));
   container.querySelectorAll('[data-place]').forEach(b=>b.onclick=()=>startPlace(b.dataset.place));
   container.querySelectorAll('[data-unplace]').forEach(b=>b.onclick=()=>unplaceCatLine(b.dataset.unplace));
+}
+
+/* ============================================================
+   Users — administrators only
+   ============================================================ */
+let USERS=[], editingUser=null;
+
+async function renderUsers(){
+  const host=$('#p-users');
+  host.innerHTML='<h2>Users</h2><p class="lead">Loading…</p>';
+  try{
+    const out=await api('/api/users');
+    USERS=out.users||[]; ROLES=out.roles||ROLES;
+  }catch(e){
+    host.innerHTML=`<h2>Users</h2><div class="note bad">${esc(e.message)}</div>`;
+    return;
+  }
+  const roleLabel=id=>ROLES.find(r=>r.id===id)?.label||id;
+
+  host.innerHTML=`
+  <h2>Users</h2>
+  <p class="lead">Passwords are stored as one-way hashes — they can be replaced but never read,
+  so a forgotten password is reset rather than recovered.</p>
+
+  <div class="card">
+    <table><thead><tr><th>User ID</th><th>Name</th><th>Role</th><th>Last sign-in</th>
+      <th>Active</th><th></th></tr></thead>
+    <tbody>${USERS.map(u=>`<tr>
+      <td class="mono">${esc(u.username)}</td>
+      <td>${esc(u.name)}</td>
+      <td>${esc(roleLabel(u.role))}</td>
+      <td class="mono" style="font-size:11.5px">${u.lastLoginAt?new Date(u.lastLoginAt).toLocaleDateString():'never'}</td>
+      <td>${u.active?'<span class="pill ok">yes</span>':'<span class="pill warn">no</span>'}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn ghost" data-uedit="${esc(u.username)}" style="padding:2px 9px">Edit</button>
+        <button class="btn quiet" data-utog="${esc(u.username)}" style="padding:2px 9px">${u.active?'Disable':'Enable'}</button>
+      </td></tr>`).join('')}</tbody></table>
+    <div class="row"><button class="btn" id="u-add">Add a user</button></div>
+  </div>
+
+  <div id="u-form" class="card hidden" style="border-color:var(--king)">
+    <h3 id="u-title">Add a user</h3>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:14px">
+      <div><label>User ID</label><input type="text" id="u-user" placeholder="scanner1" style="width:100%"></div>
+      <div><label>Full name</label><input type="text" id="u-name" style="width:100%"></div>
+      <div><label>Role</label><select id="u-role" style="width:100%">${
+        ROLES.map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('')}</select></div>
+      <div><label>Password</label><input type="password" id="u-pass" autocomplete="new-password" style="width:100%"></div>
+    </div>
+    <div class="note" id="u-rolenote"></div>
+    <div id="u-err" class="note bad hidden"></div>
+    <div class="row"><button class="btn" id="u-save">Save user</button>
+      <button class="btn quiet" id="u-cancel">Cancel</button></div>
+  </div>
+
+  <div class="card">
+    <h3>What each role can do</h3>
+    <table><thead><tr><th>Role</th><th>Permissions</th></tr></thead>
+    <tbody>${ROLES.map(r=>`<tr><td><strong>${esc(r.label)}</strong>
+      <div class="mono" style="font-size:11px;color:var(--ink-3)">${esc(r.id)}</div></td>
+      <td>${esc(r.description)}</td></tr>`).join('')}</tbody></table>
+  </div>`;
+
+  const showRoleNote=()=>{
+    const r=ROLES.find(x=>x.id===$('#u-role').value);
+    $('#u-rolenote').textContent=r?r.description:'';
+  };
+  $('#u-role').onchange=showRoleNote;
+
+  const openForm=(u)=>{
+    editingUser=u||null;
+    $('#u-form').classList.remove('hidden');
+    $('#u-err').classList.add('hidden');
+    $('#u-title').textContent=u?`Edit ${u.username}`:'Add a user';
+    $('#u-user').value=u?.username||''; $('#u-user').readOnly=Boolean(u);
+    $('#u-name').value=u?.name||'';
+    $('#u-role').value=u?.role||'scanner';
+    $('#u-pass').value='';
+    $('#u-pass').placeholder=u?'Leave blank to keep the current password':'At least 8 characters, with a number';
+    showRoleNote();
+    $('#u-form')?.scrollIntoView?.({block:'nearest'});
+  };
+
+  $('#u-add').onclick=()=>openForm(null);
+  $('#u-cancel').onclick=()=>{ $('#u-form').classList.add('hidden'); editingUser=null; };
+  host.querySelectorAll('[data-uedit]').forEach(b=>b.onclick=()=>
+    openForm(USERS.find(u=>u.username===b.dataset.uedit)));
+  host.querySelectorAll('[data-utog]').forEach(b=>b.onclick=async()=>{
+    const u=USERS.find(x=>x.username===b.dataset.utog);
+    if(!confirm(`${u.active?'Disable':'Enable'} ${u.username}?`)) return;
+    try{ await api('/api/users',{method:'PATCH',
+      body:JSON.stringify({username:u.username,active:!u.active})}); renderUsers(); }
+    catch(e){ alert(e.message); }
+  });
+
+  $('#u-save').onclick=async()=>{
+    $('#u-err').classList.add('hidden');
+    const body={ username:$('#u-user').value.trim().toLowerCase(),
+      name:$('#u-name').value.trim(), role:$('#u-role').value };
+    const pw=$('#u-pass').value;
+    if(pw) body.password=pw;
+    if(!editingUser&&!pw){
+      $('#u-err').textContent='Set a password for the new user.';
+      $('#u-err').classList.remove('hidden'); return;
+    }
+    try{
+      await api('/api/users',{ method: editingUser?'PATCH':'POST', body: JSON.stringify(body) });
+      $('#u-form').classList.add('hidden'); editingUser=null; renderUsers();
+      toast('User saved');
+    }catch(e){
+      $('#u-err').textContent=e.message; $('#u-err').classList.remove('hidden');
+    }
+  };
 }
 
 /* ============================================================
@@ -6947,6 +7310,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   $('#p-scan').classList.toggle('hidden',t!=='scan');
   $('#p-summary').classList.toggle('hidden',t!=='summary');
   $('#p-racks').classList.toggle('hidden',t!=='racks');
+  $('#p-users').classList.toggle('hidden',t!=='users');
   $('#toolsec').style.display = t==='map'?'':'none';
   if(t!=='scan'&&camStream){ camStream.getTracks().forEach(x=>x.stop()); camStream=null; }
   if(t==='catalog') renderCatalog();
@@ -6954,19 +7318,53 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   if(t==='scan') renderScan();
   if(t==='summary') renderSummary();
   if(t==='racks') renderRacks();
+  if(t==='users') renderUsers();
 });
 
-(async function boot(){
+async function boot(){
   const saved=await loadSaved();
   if(saved&&saved.racks) S={inv:{},locks:{},notes:{},kinds:{},labels:{},catLines:[],...saved};
   S.kinds=S.kinds||{}; S.labels=S.labels||{}; S.catLines=S.catLines||[];
   applyOfficialColors();
-  const added=seedSheets();
+  // Only an administrator may seed the rack sheets; a scanner's copy would be
+  // reverted by the server anyway, so it is not attempted.
+  const added = isAdmin() ? seedSheets() : [];
   if(added.length) save();
   active=S.brands[0]?.name||null;
   const rks=Object.keys(S.racks);
   if(rks.length&&rks.every(isLocked)) $('#locktoggle').textContent='Unlock every rack';
   $('#qtytoggle').checked=showQty;
   syncTool(); renderRail(); renderMap();
+}
+
+/* Wire the door, then either resume a session or show it. */
+document.getElementById('gateGo').onclick=doSignIn;
+['loginUser','loginPass','suToken','suName'].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el) el.addEventListener('keydown',e=>{ if(e.key==='Enter') doSignIn(); });
+});
+document.getElementById('btnOut').onclick=()=>signOut();
+document.getElementById('btnPass').onclick=changeOwnPassword;
+
+async function changeOwnPassword(){
+  const cur=prompt('Current password'); if(cur===null) return;
+  const next=prompt('New password — at least 8 characters, with a number'); if(next===null) return;
+  try{
+    await api('/api/auth',{method:'POST',
+      body:JSON.stringify({action:'change-password',currentPassword:cur,newPassword:next})});
+    toast('Password changed');
+  }catch(e){ alert(e.message); }
+}
+
+(async ()=>{
+  if(!SESSION){ await showGate(); return; }
+  try{
+    const r=await fetch('/api/auth',{cache:'no-store',headers:{'x-session':SESSION}});
+    const info=await r.json();
+    ROLES=info.roles||[];
+    if(!info.signedIn){ signOut(); return; }
+    ME=info.user;
+    await enterApp();
+  }catch{ signOut(); }
 })();
 </script>
