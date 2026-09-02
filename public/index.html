@@ -249,7 +249,12 @@ tbody tr:hover td{background:#faf7f4}
   background-image:repeating-linear-gradient(45deg,transparent 0 4px,rgba(0,0,0,.16) 4px 8px)}
 .dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:7px;
   box-shadow:inset 0 0 0 1px rgba(0,0,0,.18);vertical-align:baseline}
-.scanbar{display:grid;grid-template-columns:150px 1fr 92px;gap:10px;align-items:end}
+.scanbar{display:grid;grid-template-columns:140px 1fr 88px 150px;gap:10px;align-items:end}
+.unitpick{display:flex;gap:4px}
+.unitpick button{flex:1;padding:9px 4px;border:1px solid var(--line-2);background:#fff;
+  border-radius:7px;font:500 12.5px var(--sans);color:var(--ink-2)}
+.unitpick button.on{background:var(--king);border-color:var(--king);color:#fff}
+@media (max-width:900px){.scanbar{grid-template-columns:1fr 1fr}}
 .fld{display:flex;flex-direction:column;gap:4px}
 .fld label{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-2)}
 .fld input{padding:9px 10px;border:1px solid var(--line-hard);border-radius:3px;background:#fff;font-family:var(--mono);font-size:15px}
@@ -5471,15 +5476,27 @@ const BY_CODE=new Map(), BY_SKU=new Map(), CAT=[];
     if(!BY_SKU.has(k)) BY_SKU.set(k,rec);
   }
 })();
+/**
+ * Find a SKU from whatever was scanned or typed.
+ *
+ * `matched` says which barcode it was — 'box', 'item' or 'sku' — because that
+ * decides whether the number entered means cartons or loose pieces. Box is
+ * checked first: a box barcode is the one a picker is most likely to be
+ * pointing at, and getting it backwards multiplies the count by the pack size.
+ */
 function lookup(raw){
   let q=String(raw||'').trim();
   if(!q) return null;
   const digits=q.replace(/\D/g,'');
   if(S.catLines&&S.catLines.length){
-    if(digits){ const byUpc=S.catLines.find(l=>l.upc&&l.upc===digits);
-      if(byUpc) return {sku:byUpc.sku,packing:byUpc.packing,brand:byUpc.brand}; }
+    if(digits){
+      const byBox=S.catLines.find(l=>l.boxUpc&&l.boxUpc===digits);
+      if(byBox) return {sku:byBox.sku,packing:byBox.packing,brand:byBox.brand,matched:'box'};
+      const byUpc=S.catLines.find(l=>l.upc&&l.upc===digits);
+      if(byUpc) return {sku:byUpc.sku,packing:byUpc.packing,brand:byUpc.brand,matched:'item'};
+    }
     const bySku=S.catLines.find(l=>(l.sku||'').toUpperCase()===q.toUpperCase());
-    if(bySku) return {sku:bySku.sku,packing:bySku.packing,brand:bySku.brand};
+    if(bySku) return {sku:bySku.sku,packing:bySku.packing,brand:bySku.brand,matched:'sku'};
   }
   if(digits&&BY_CODE.has(digits)) return BY_CODE.get(digits);
   // some scanners drop or add a leading zero on 12/13-digit codes
@@ -5979,6 +5996,10 @@ function splitBrands(s){
    Scan
    ============================================================ */
 let scanLoc='', scanSession=[], camStream=null;
+/* 'box' means the number typed is cartons; 'piece' means loose units. Set from
+   which barcode matched, and overridable — the picker can always see which the
+   tool thinks it is before the count is written. */
+let scanUnit='box';
 function renderScan(){
   const supported = 'BarcodeDetector' in window;
   $('#p-scan').innerHTML=`
@@ -5992,8 +6013,13 @@ function renderScan(){
         <input type="text" id="s-loc" placeholder="A4.1" value="${scanLoc}" style="text-transform:uppercase"></div>
       <div class="fld"><label>Scan barcode or type SKU</label>
         <input type="text" id="s-code" placeholder="waiting for scan…" autocomplete="off"></div>
-      <div class="fld"><label>Boxes</label>
+      <div class="fld"><label id="s-countlabel">Boxes</label>
         <input type="number" id="s-boxes" value="1" min="0" step="1"></div>
+      <div class="fld"><label>Counting</label>
+        <div class="unitpick">
+          <button type="button" data-unit="box" class="on">Boxes</button>
+          <button type="button" data-unit="piece">Pieces</button>
+        </div></div>
     </div>
     <div class="row">
       <label><input type="checkbox" id="s-merge" checked> Add to the same SKU if already at this slot</label>
@@ -6009,7 +6035,8 @@ function renderScan(){
       ${scanSession.slice().reverse().map((e,i)=>`<tr${i===0?' class="new"':''}>
         <td style="font-family:var(--mono)">${e.loc}</td>
         <td style="font-family:var(--mono)">${esc(e.sku)}</td>
-        <td class="num">${e.boxes}</td><td class="num">${e.packing??'—'}</td><td class="num">${e.qty.toLocaleString()}</td>
+        <td class="num">${e.boxes??'—'}</td><td class="num">${e.packing??'—'}</td>
+        <td class="num">${e.qty.toLocaleString()}${e.unit==='piece'?' <span style="color:var(--ink-3);font-size:10px">pcs</span>':''}</td>
         <td style="text-align:right"><button class="btn ghost" data-undo="${scanSession.length-1-i}" style="padding:2px 8px">Undo</button></td></tr>`).join('')}
       </tbody></table></div>
       <div class="row"><button class="btn ghost" id="s-clearlog">Clear session list</button></div>`
@@ -6020,12 +6047,23 @@ function renderScan(){
   $('#s-loc').oninput=e=>{ scanLoc=e.target.value.toUpperCase().replace(/\s+/g,''); e.target.value=scanLoc; };
   code.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); takeScan(code.value); code.value=''; } };
   $('#s-boxes').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); code.focus(); } };
+  $('#p-scan').querySelectorAll('[data-unit]').forEach(b=>b.onclick=()=>setScanUnit(b.dataset.unit,true));
+  setScanUnit(scanUnit,false);
   $('#s-clearlog')&&($('#s-clearlog').onclick=()=>{ scanSession=[]; renderScan(); });
   $('#p-scan').querySelectorAll('[data-undo]').forEach(b=>b.onclick=()=>undoScan(+b.dataset.undo));
   if(supported) $('#s-cam').onclick=toggleCam;
   code.focus();
 }
 function showHit(html,cls){ $('#s-hit').innerHTML=`<div class="hit-card ${cls||''}">${html}</div>`; }
+
+function setScanUnit(u,focusBack){
+  scanUnit = u==='piece' ? 'piece' : 'box';
+  $('#p-scan')?.querySelectorAll('[data-unit]').forEach(b=>
+    b.classList.toggle('on', b.dataset.unit===scanUnit));
+  const lab=$('#s-countlabel');
+  if(lab) lab.textContent = scanUnit==='box' ? 'Boxes' : 'Pieces';
+  if(focusBack) $('#s-code')?.focus();
+}
 
 function takeScan(raw){
   const loc=(scanLoc||'').toUpperCase();
@@ -6041,15 +6079,23 @@ function takeScan(raw){
       <div class="hit-note">Nothing was recorded. Check the code, or add this line by hand on the Inventory tab.</div>`,'miss');
     return;
   }
-  const boxes=Math.max(0,parseFloat($('#s-boxes').value)||0);
+  // The barcode decides how to read the number: a box code means cartons, an
+  // item code means loose pieces. A typed SKU tells us nothing, so whatever the
+  // toggle already says stands.
+  if(rec.matched==='box') setScanUnit('box',false);
+  else if(rec.matched==='item') setScanUnit('piece',false);
+
+  const count=Math.max(0,parseFloat($('#s-boxes').value)||0);
   const packing=rec.packing;
-  if(packing==null){
+  if(scanUnit==='box'&&packing==null){
     showHit(`<div class="hit-sku">${esc(rec.sku)}</div>
-      <div class="hit-meta"><span>${esc(rec.brand||'no brand')}</span><span>packing not in catalogue</span></div>
-      <div class="hit-note">Nothing was recorded — this SKU has no pack size, so a total can't be worked out. Enter it by hand on the Inventory tab.</div>`,'miss');
+      <div class="hit-meta"><span>${esc(rec.brand||'no brand')}</span><span>no pack size on file</span></div>
+      <div class="hit-note">Nothing was recorded — counting boxes needs a pack size to work out
+      the pieces. Switch <strong>Counting</strong> to Pieces, or add the packing on the Catalog tab.</div>`,'miss');
     return;
   }
-  const qty=boxes*packing;
+  const boxes = scanUnit==='box' ? count : null;
+  const qty   = scanUnit==='box' ? count*packing : count;
 
   if(!S.racks[rk]) S.racks[rk]={};
   const arr=S.racks[rk][bay]||[];
@@ -6060,10 +6106,15 @@ function takeScan(raw){
   let merged=false;
   if($('#s-merge').checked){
     const ex=S.inv[loc].find(x=>x.sku===rec.sku);
-    if(ex){ ex.boxes=(+ex.boxes||0)+boxes; ex.packing=packing; ex.qty=(+ex.qty||0)+qty; merged=true; }
+    if(ex){
+      if(boxes!=null) ex.boxes=(+ex.boxes||0)+boxes;
+      if(packing!=null) ex.packing=packing;
+      ex.qty=(+ex.qty||0)+qty;
+      merged=true;
+    }
   }
   if(!merged) S.inv[loc].push({sku:rec.sku,boxes,packing,qty});
-  scanSession.push({loc,sku:rec.sku,boxes,packing,qty,merged});
+  scanSession.push({loc,sku:rec.sku,boxes,packing,qty,merged,unit:scanUnit});
 
   // does the stock match what this slot is mapped to?
   const mapped=S.assign[loc]||[];
@@ -6082,7 +6133,11 @@ function takeScan(raw){
     <div class="hit-meta">
       <span>${esc(rec.brand||'no brand')}</span>
       <span>${loc}</span>
-      <span class="big">${boxes} × ${packing} = ${qty.toLocaleString()}</span>
+      <span class="pill ${rec.matched==='box'?'ok':rec.matched==='item'?'warn':''}">${
+        rec.matched==='box' ? 'box barcode' : rec.matched==='item' ? 'item barcode' : 'typed SKU'}</span>
+      <span class="big">${scanUnit==='box'
+        ? `${count} × ${packing} = ${qty.toLocaleString()} pcs`
+        : `${qty.toLocaleString()} pc${qty===1?'':'s'}`}</span>
       ${merged?'<span>added to existing line</span>':''}
     </div>${note}`, note?'warn':'');
 
@@ -6093,7 +6148,7 @@ function undoScan(i){
   const list=S.inv[e.loc]||[];
   const line=list.find(x=>x.sku===e.sku);
   if(line){
-    line.boxes=(+line.boxes||0)-e.boxes;
+    if(e.boxes!=null) line.boxes=(+line.boxes||0)-e.boxes;
     line.qty=(+line.qty||0)-e.qty;
     if(line.qty<=0||line.boxes<=0) S.inv[e.loc]=list.filter(x=>x!==line);
     if(!S.inv[e.loc].length) delete S.inv[e.loc];
@@ -6415,15 +6470,18 @@ const importerIds = pfx => ({ file:`${pfx}-file`, sheets:`${pfx}-sheets`,
 /* ---------------- Catalog: UPC, SKU, brand, packing, qty ---------------- */
 const CAT_FIELDS = {
   sku:     ['sku','skucode','itemcode','item','code','articlecode','model','modelno'],
-  upc:     ['upc','ean','barcode','gtin','ean13','code128'],
+  upc:     ['upc','ean','barcode','gtin','ean13','code128','itemupc','pieceupc',
+            'unitupc','innerupc','upcitem','itembarcode'],
+  boxUpc:  ['boxupc','cartonupc','outerupc','masterupc','upcbox','boxbarcode',
+            'cartonbarcode','outerbarcode','mastercartonupc','ctnupc','boxean'],
   brand:   ['brand','brandname','sl','subbrand'],
   packing: ['packing','packingqty','pack','packsize','pcspercarton','pcsctn','pcsperctn',
             'qtypercarton','pcsperbox','qtyperbox','innerqty'],
   qty:     ['qty','quantity','total','totalqty','pieces','pcs','onhand','stock','balance'],
   imageUrl:['image','imageurl','imagelink','photo','picture','img','imgurl','thumbnail']
 };
-const CAT_LABEL = { sku:'SKU', upc:'UPC / barcode', brand:'Brand',
-  packing:'Packing (pcs per carton)', qty:'Qty', imageUrl:'Image URL' };
+const CAT_LABEL = { sku:'SKU', upc:'Item UPC (single piece)', boxUpc:'Box UPC (full carton)',
+  brand:'Brand', packing:'Packing (pcs per carton)', qty:'Qty', imageUrl:'Image URL' };
 
 /**
  * Bring a file into the catalog.
@@ -6447,6 +6505,7 @@ function commitCatalog(rows,{dryRun}){
     const rowRef=r.__row||'';
     if(!sku){ rejected.push({rowRef,key:'',reasons:['no SKU']}); return; }
     const upc=String(r.upc??'').replace(/\D/g,'');
+    const boxUpc=String(r.boxUpc??'').replace(/\D/g,'');
     const brand=String(r.brand??'').trim().toUpperCase();
     const packing=num(r.packing), qty=num(r.qty);
     const rawImg=String(r.imageUrl??'').trim();
@@ -6456,7 +6515,9 @@ function commitCatalog(rows,{dryRun}){
     if(qty===null) notes.push('no qty, treated as 0');
     if(brand&&!brandOf(brand)) notes.push(`brand "${brand}" is not in the palette yet`);
     if(rawImg&&!imageUrl) notes.push('image URL ignored — it must start with http');
-    parsed.push({ rowRef, sku, upc, brand, packing, qty:qty===null?0:qty, imageUrl, notes });
+    if(boxUpc&&boxUpc===upc) notes.push('item and box UPC are the same — a box scan cannot be told apart from a piece');
+    if(boxUpc&&!packing) notes.push('box UPC given but no packing, so a box scan cannot be converted to pieces');
+    parsed.push({ rowRef, sku, upc, boxUpc, brand, packing, qty:qty===null?0:qty, imageUrl, notes });
   });
 
   // Work out what would happen before doing any of it, so the dry run and the
@@ -6524,13 +6585,14 @@ function commitCatalog(rows,{dryRun}){
     plan.forEach(step=>{
       const p=step.p;
       if(step.type==='create'){
-        S.catLines.push({ id:newCatId(), upc:p.upc, sku:p.sku, brand:p.brand,
+        S.catLines.push({ id:newCatId(), upc:p.upc, boxUpc:p.boxUpc, sku:p.sku, brand:p.brand,
           packing:p.packing, qty:p.qty, imageUrl:p.imageUrl, loc:'' });
         return;
       }
       step.hits.forEach(h=>{
         // Blank cells never wipe something already recorded.
         if(p.upc) h.upc=p.upc;
+        if(p.boxUpc) h.boxUpc=p.boxUpc;
         if(p.brand) h.brand=p.brand;
         if(p.packing!=null) h.packing=p.packing;
         if(p.imageUrl) h.imageUrl=p.imageUrl;
@@ -6581,6 +6643,7 @@ function mergeCatalogDuplicates(){
       // Anything the unplaced copies knew that the placed ones did not.
       placed.forEach(t=>loose.forEach(l=>{
         if(!t.upc&&l.upc) t.upc=l.upc;
+        if(!t.boxUpc&&l.boxUpc) t.boxUpc=l.boxUpc;
         if(!t.brand&&l.brand) t.brand=l.brand;
         if(t.packing==null&&l.packing!=null) t.packing=l.packing;
         if(!t.imageUrl&&l.imageUrl) t.imageUrl=l.imageUrl;
@@ -6593,6 +6656,7 @@ function mergeCatalogDuplicates(){
     g.forEach(l=>{
       if(l===best) return;
       if(!best.upc&&l.upc) best.upc=l.upc;
+      if(!best.boxUpc&&l.boxUpc) best.boxUpc=l.boxUpc;
       if(!best.brand&&l.brand) best.brand=l.brand;
       if(best.packing==null&&l.packing!=null) best.packing=l.packing;
       if(!best.imageUrl&&l.imageUrl) best.imageUrl=l.imageUrl;
@@ -6609,7 +6673,7 @@ function mergeCatalogDuplicates(){
 const catImporter = makeImporter({
   fields:CAT_FIELDS, labels:CAT_LABEL, required:['sku'], wanted:['qty'],
   ids: importerIds('c'),
-  ignoreNote:'This tool only takes UPC, SKU, brand, packing, qty and an image URL.',
+  ignoreNote:'This tool takes SKU, item UPC, box UPC, brand, packing, qty and an image URL.',
   commitLabel:'Save to catalog',
   commit: commitCatalog,
   stats: s => [['Rows read',s.rowsReceived],['Updated',s.updated],['Added',s.created],
@@ -6706,7 +6770,10 @@ function catRow(l){
   return `<tr>
     <td>${thumb}</td>
     <td style="font-family:var(--mono)">${esc(l.sku)}</td>
-    <td class="mono" style="font-size:12px;color:var(--ink-2)">${esc(l.upc||'—')}</td>
+    <td class="mono" style="font-size:11.5px;color:var(--ink-2);line-height:1.45">
+      ${l.upc?`<div title="Item UPC">${esc(l.upc)}</div>`:''}
+      ${l.boxUpc?`<div title="Box UPC" style="color:var(--king-deep)">▣ ${esc(l.boxUpc)}</div>`:''}
+      ${!l.upc&&!l.boxUpc?'—':''}</td>
     <td>${l.brand?`<span class="dot" style="background:${colorOf(l.brand)}"></span>${esc(l.brand)}`:'—'}</td>
     <td class="num">${l.packing!=null?l.packing:'—'}</td>
     <td class="num">${(+l.qty||0).toLocaleString()}</td>
@@ -6734,7 +6801,10 @@ function openCatEditor(id){
     <h3 id="ce-title">Edit ${esc(l.sku)}</h3>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
       <div><label>SKU</label><input type="text" id="ce-sku" value="${esc(l.sku)}" style="width:100%"></div>
-      <div><label>UPC / barcode</label><input type="text" id="ce-upc" value="${esc(l.upc||'')}" inputmode="numeric" style="width:100%"></div>
+      <div><label>Item UPC — one piece</label>
+        <input type="text" id="ce-upc" value="${esc(l.upc||'')}" inputmode="numeric" style="width:100%"></div>
+      <div><label>Box UPC — full carton</label>
+        <input type="text" id="ce-boxupc" value="${esc(l.boxUpc||'')}" inputmode="numeric" style="width:100%"></div>
       <div><label>Brand</label><input type="text" id="ce-brand" value="${esc(l.brand||'')}" list="ce-brands" style="width:100%;text-transform:uppercase">
         <datalist id="ce-brands">${S.brands.map(b=>`<option value="${esc(b.name)}">`).join('')}</datalist></div>
       <div><label>Packing (pcs per carton)</label><input type="number" id="ce-packing" min="1" value="${l.packing??''}" style="width:100%"></div>
@@ -6784,6 +6854,11 @@ function openCatEditor(id){
 
     l.sku=sku;
     l.upc=$('#ce-upc').value.replace(/\D/g,'');
+    l.boxUpc=$('#ce-boxupc').value.replace(/\D/g,'');
+    if(l.boxUpc&&l.boxUpc===l.upc){
+      $('#ce-err').textContent='The item and box UPC cannot be the same — a box scan could not be told apart from a single piece.';
+      $('#ce-err').classList.remove('hidden'); return;
+    }
     l.brand=brand;
     l.packing=num($('#ce-packing').value);
     l.qty=num($('#ce-qty').value)||0;
@@ -6910,8 +6985,9 @@ function renderCatalog(){
   };
 
   $('#c-csv').onclick=()=>{
-    const rows=[['UPC','SKU','Brand','Packing','Qty','Image URL','Location']];
-    (S.catLines||[]).forEach(l=>rows.push([l.upc||'',l.sku,l.brand||'',l.packing??'',l.qty||0,l.imageUrl||'',l.loc||'']));
+    const rows=[['Item UPC','Box UPC','SKU','Brand','Packing','Qty','Image URL','Location']];
+    (S.catLines||[]).forEach(l=>rows.push([l.upc||'',l.boxUpc||'',l.sku,l.brand||'',
+      l.packing??'',l.qty||0,l.imageUrl||'',l.loc||'']));
     if(rows.length===1) return toast('Nothing in the catalog yet');
     const csv=rows.map(r=>r.map(v=>/[",]/.test(String(v))?`"${String(v).replace(/"/g,'""')}"`:v).join(',')).join('\n');
     download('catalog.csv',csv,'text/csv');
@@ -6926,7 +7002,7 @@ function renderCatalogResults(){
   reconcileCatalog();
   const lines=S.catLines||[];
   const q=catQuery.trim().toUpperCase();
-  const filtered=q?lines.filter(l=>[l.sku,l.upc,l.brand].some(x=>(x||'').toUpperCase().includes(q))):lines;
+  const filtered=q?lines.filter(l=>[l.sku,l.upc,l.boxUpc,l.brand].some(x=>(x||'').toUpperCase().includes(q))):lines;
 
   let summary='';
   const distinctSkus=[...new Set(filtered.map(l=>(l.sku||'').toUpperCase()))];
@@ -6939,14 +7015,14 @@ function renderCatalogResults(){
       <div class="hit-meta">${any.imageUrl?`<img src="${esc(any.imageUrl)}" alt="" loading="lazy"
         onerror="this.style.display='none'" style="width:52px;height:52px;object-fit:contain;
         border-radius:6px;background:#fff;border:1px solid var(--line)">`:''}
-        <span>${esc(any.brand||'no brand')}</span><span>UPC ${esc(any.upc||'—')}</span><span>pack ${any.packing??'—'}</span></div>
+        <span>${esc(any.brand||'no brand')}</span><span>item ${esc(any.upc||'—')}</span><span>box ${esc(any.boxUpc||'—')}</span><span>pack ${any.packing??'—'}</span></div>
       <div class="hit-note">${filtered.length} line${filtered.length===1?'':'s'} · ${totalQ.toLocaleString()} pieces total${
         placed.length?` · at ${placed.map(l=>`${l.loc} (${(+l.qty||0).toLocaleString()})`).join(', ')}`:' · not placed on the map yet'}</div>
     </div>`;
   }
 
   container.innerHTML=summary+(filtered.length
-    ? `<table><thead><tr><th style="width:44px"></th><th>SKU</th><th>UPC</th><th>Brand</th><th class="num">Pack</th><th class="num">Qty</th><th>Location</th><th></th></tr></thead>
+    ? `<table><thead><tr><th style="width:44px"></th><th>SKU</th><th>Barcodes</th><th>Brand</th><th class="num">Pack</th><th class="num">Qty</th><th>Location</th><th></th></tr></thead>
        <tbody>${filtered.slice(0,300).map(catRow).join('')}</tbody></table>
        ${filtered.length>300?`<p class="mini" style="color:var(--ink-2);margin-top:8px">Showing the first 300 of ${filtered.length} matches — narrow the search.</p>`:''}`
     : (lines.length?'<p class="lead" style="margin:0">No matches.</p>':'<p class="lead" style="margin:0">Import your list above to search it.</p>'));
