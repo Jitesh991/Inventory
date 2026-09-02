@@ -31,9 +31,11 @@ export const blobAccess = () =>
 /**
  * Read a blob's contents.
  *
- * A public blob can be fetched from its url directly. A private one cannot —
- * the url is not world-readable — so head() is used to mint a signed download
- * url first. Written to work either way rather than assuming.
+ * How this is fetched depends on the store. A public blob is readable from its
+ * url directly; a private one is not, and needs the store token presented as a
+ * bearer credential. Rather than branch on a setting that can be wrong, each
+ * way is tried in turn and the failures are reported together — a silent
+ * fallback here is what turned a 403 into a mystery once already.
  */
 export async function readBlob(pathname) {
   const token = blobToken();
@@ -41,15 +43,25 @@ export async function readBlob(pathname) {
   const hit = blobs.find(b => b.pathname === pathname);
   if (!hit) return null;
 
-  let url = hit.downloadUrl || hit.url;
-  try {
-    const meta = await head(hit.url, { token });
-    url = meta.downloadUrl || meta.url || url;
-  } catch { /* public stores need no signing; fall through with the plain url */ }
+  const attempts = [];
+  const tries = [
+    ['token', hit.url, { headers: { Authorization: `Bearer ${token}` } }],
+    ['plain', hit.url, {}]
+  ];
+  if (hit.downloadUrl && hit.downloadUrl !== hit.url) {
+    tries.push(['downloadUrl', hit.downloadUrl, { headers: { Authorization: `Bearer ${token}` } }]);
+  }
 
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) throw new Error(`Could not read ${pathname} (HTTP ${r.status})`);
-  return await r.json();
+  for (const [how, url, init] of tries) {
+    try {
+      const r = await fetch(url, { cache: 'no-store', ...init });
+      if (r.ok) return await r.json();
+      attempts.push(`${how}: HTTP ${r.status}`);
+    } catch (e) {
+      attempts.push(`${how}: ${e.message}`);
+    }
+  }
+  throw new Error(`Could not read ${pathname} — ${attempts.join('; ')}`);
 }
 
 export async function writeBlob(pathname, data) {
