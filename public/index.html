@@ -6425,9 +6425,23 @@ const CAT_FIELDS = {
 const CAT_LABEL = { sku:'SKU', upc:'UPC / barcode', brand:'Brand',
   packing:'Packing (pcs per carton)', qty:'Qty', imageUrl:'Image URL' };
 
+/**
+ * Bring a file into the catalog.
+ *
+ * Default is to update in place rather than append, because the same file gets
+ * re-uploaded whenever the master changes and appending turns one SKU into
+ * three. A row is matched to an existing line by UPC when it has one, and by
+ * SKU otherwise, so a file that gains barcodes later still lands on the right
+ * lines instead of creating a second set.
+ */
+function catKeyOf(upc, sku){
+  return upc ? 'U:'+upc : 'S:'+String(sku||'').trim().toUpperCase();
+}
+
 function commitCatalog(rows,{dryRun}){
-  const rejected=[], warnings=[], clean=[], seen=new Map();
-  const replace = $('#c-mode') && $('#c-mode').value==='replace';
+  const rejected=[], warnings=[], parsed=[];
+  const mode = ($('#c-mode') && $('#c-mode').value) || 'update';
+
   rows.forEach(r=>{
     const sku=String(r.sku??'').trim();
     const rowRef=r.__row||'';
@@ -6435,35 +6449,161 @@ function commitCatalog(rows,{dryRun}){
     const upc=String(r.upc??'').replace(/\D/g,'');
     const brand=String(r.brand??'').trim().toUpperCase();
     const packing=num(r.packing), qty=num(r.qty);
+    const rawImg=String(r.imageUrl??'').trim();
+    const imageUrl=/^https?:\/\//i.test(rawImg)?rawImg:'';
     const notes=[];
     if(!packing) notes.push('no packing, so boxes cannot be worked out');
     if(qty===null) notes.push('no qty, treated as 0');
     if(brand&&!brandOf(brand)) notes.push(`brand "${brand}" is not in the palette yet`);
-    const dupe=seen.get(sku.toUpperCase());
-    if(dupe) notes.push(`same SKU also on ${dupe} — kept as a separate batch`);
-    seen.set(sku.toUpperCase(),rowRef);
-    if(notes.length) warnings.push({rowRef,key:sku,notes});
-    const imageUrl=String(r.imageUrl??'').trim();
-    if(imageUrl&&!/^https?:\/\//i.test(imageUrl)) notes.push('image URL ignored — it must start with http');
-    clean.push({id:newCatId(),upc,sku,brand,packing,qty:qty===null?0:qty,
-      imageUrl:/^https?:\/\//i.test(imageUrl)?imageUrl:'',loc:''});
+    if(rawImg&&!imageUrl) notes.push('image URL ignored — it must start with http');
+    parsed.push({ rowRef, sku, upc, brand, packing, qty:qty===null?0:qty, imageUrl, notes });
   });
-  const summary={ rowsReceived:rows.length, accepted:clean.length, rejected:rejected.length,
-    warnings:warnings.length, linesAfter:(replace?0:(S.catLines||[]).length)+clean.length };
+
+  // Work out what would happen before doing any of it, so the dry run and the
+  // real thing report identical numbers.
+  const current = mode==='replace' ? [] : (S.catLines||[]);
+  // Only 'update' looks for matches. 'append' deliberately adds everything.
+  const existing = mode==='update' ? current : [];
+  const byKey = new Map();
+  existing.forEach(l=>{
+    const k=catKeyOf(l.upc,l.sku);
+    if(!byKey.has(k)) byKey.set(k,[]);
+    byKey.get(k).push(l);
+  });
+  // A file row with a UPC should still find a line stored without one.
+  const bySku = new Map();
+  existing.forEach(l=>{
+    const k='S:'+String(l.sku||'').toUpperCase();
+    if(!bySku.has(k)) bySku.set(k,[]);
+    bySku.get(k).push(l);
+  });
+
+  let created=0, updated=0, qtyHeld=0;
+  const plan=[];
+  const seenThisFile=new Set();
+
+  parsed.forEach(p=>{
+    const k=catKeyOf(p.upc,p.sku);
+    let hits = byKey.get(k) || [];
+    if(!hits.length && p.upc) hits = bySku.get('S:'+p.sku.toUpperCase()) || [];
+    if(seenThisFile.has(k) && hits.length){
+      p.notes.push('this file lists the same item more than once — the last row wins');
+    }
+    seenThisFile.add(k);
+
+    if(hits.length){
+      updated++;
+      // Quantity is per location. With the item in several places, the file
+      // cannot say which one it refers to, so descriptive fields update and
+      // the quantities are left alone rather than guessed at.
+      const placed = hits.filter(h=>h.loc);
+      if(hits.length>1 && placed.length>1){
+        qtyHeld++;
+        p.notes.push(`in ${placed.length} locations — details updated, quantities left as they are`);
+      }
+      plan.push({ type:'update', hits, p, setQty: !(hits.length>1 && placed.length>1) });
+    } else {
+      created++;
+      plan.push({ type:'create', p });
+    }
+    if(p.notes.length) warnings.push({ rowRef:p.rowRef, key:p.sku, notes:p.notes });
+  });
+
+  const summary={ rowsReceived:rows.length, accepted:parsed.length, created, updated,
+    rejected:rejected.length, warnings:warnings.length, qtyHeld,
+    linesAfter: current.length + created };
+
   if(!dryRun){
-    if(replace){
+    if(mode==='replace'){
       Object.keys(S.inv).forEach(loc=>{
         S.inv[loc]=S.inv[loc].filter(x=>!x._catId);
         if(!S.inv[loc].length) delete S.inv[loc];
       });
       S.catLines=[];
     }
-    S.catLines=(S.catLines||[]).concat(clean);
-    clean.forEach(l=>{ if(l.brand&&!brandOf(l.brand))
+    plan.forEach(step=>{
+      const p=step.p;
+      if(step.type==='create'){
+        S.catLines.push({ id:newCatId(), upc:p.upc, sku:p.sku, brand:p.brand,
+          packing:p.packing, qty:p.qty, imageUrl:p.imageUrl, loc:'' });
+        return;
+      }
+      step.hits.forEach(h=>{
+        // Blank cells never wipe something already recorded.
+        if(p.upc) h.upc=p.upc;
+        if(p.brand) h.brand=p.brand;
+        if(p.packing!=null) h.packing=p.packing;
+        if(p.imageUrl) h.imageUrl=p.imageUrl;
+        h.sku=p.sku;
+        if(step.setQty) h.qty=p.qty;
+        // Stock already placed from this line follows the change.
+        if(h.loc&&S.inv[h.loc]){
+          const line=S.inv[h.loc].find(x=>x._catId===h.id);
+          if(line){ line.sku=h.sku; line.packing=h.packing; line.qty=h.qty;
+            line.boxes=h.packing?+(h.qty/h.packing).toFixed(2):null; }
+        }
+      });
+    });
+    (S.catLines||[]).forEach(l=>{ if(l.brand&&!brandOf(l.brand))
       S.brands.push({name:l.brand,color:FALLBACK[S.brands.length%FALLBACK.length]}); });
     commit();
   }
   return { summary, rejected, warnings, committed:!dryRun };
+}
+
+/**
+ * Fold existing duplicates together. Needed once, for catalogs that grew a
+ * second and third copy of everything before importing learned to update.
+ *
+ * Grouped by SKU alone, not by UPC: repeated imports often recorded a
+ * different barcode each time, so the copies of one product rarely agree on
+ * UPC. The SKU is what identifies the item.
+ */
+function mergeCatalogDuplicates(){
+  const lines=S.catLines||[];
+  const groups=new Map();
+  lines.forEach(l=>{
+    const k=String(l.sku||'').trim().toUpperCase();
+    if(!groups.has(k)) groups.set(k,[]);
+    groups.get(k).push(l);
+  });
+
+  let removed=0;
+  const keep=[];
+  groups.forEach(g=>{
+    if(g.length===1){ keep.push(g[0]); return; }
+    // Placed lines are real stock in a real slot and are never folded away.
+    const placed=g.filter(l=>l.loc);
+    const loose=g.filter(l=>!l.loc);
+    if(placed.length){
+      keep.push(...placed);
+      loose.forEach(l=>{ removed++; });
+      // Anything the unplaced copies knew that the placed ones did not.
+      placed.forEach(t=>loose.forEach(l=>{
+        if(!t.upc&&l.upc) t.upc=l.upc;
+        if(!t.brand&&l.brand) t.brand=l.brand;
+        if(t.packing==null&&l.packing!=null) t.packing=l.packing;
+        if(!t.imageUrl&&l.imageUrl) t.imageUrl=l.imageUrl;
+      }));
+      return;
+    }
+    // All unplaced: keep the richest one and merge the rest into it.
+    const score=l=>(l.upc?1:0)+(l.brand?1:0)+(l.packing!=null?1:0)+(l.imageUrl?1:0)+(+l.qty>0?1:0);
+    const best=g.slice().sort((a,b)=>score(b)-score(a))[0];
+    g.forEach(l=>{
+      if(l===best) return;
+      if(!best.upc&&l.upc) best.upc=l.upc;
+      if(!best.brand&&l.brand) best.brand=l.brand;
+      if(best.packing==null&&l.packing!=null) best.packing=l.packing;
+      if(!best.imageUrl&&l.imageUrl) best.imageUrl=l.imageUrl;
+      if(!(+best.qty>0)&&+l.qty>0) best.qty=l.qty;
+      removed++;
+    });
+    keep.push(best);
+  });
+
+  S.catLines=keep;
+  return removed;
 }
 
 const catImporter = makeImporter({
@@ -6472,9 +6612,10 @@ const catImporter = makeImporter({
   ignoreNote:'This tool only takes UPC, SKU, brand, packing, qty and an image URL.',
   commitLabel:'Save to catalog',
   commit: commitCatalog,
-  stats: s => [['Rows read',s.rowsReceived],['Accepted',s.accepted],
+  stats: s => [['Rows read',s.rowsReceived],['Updated',s.updated],['Added',s.created],
     ['Rejected',s.rejected],['Worth a look',s.warnings]],
-  savedMessage: s => `Saved. The catalog now holds ${s.linesAfter} line${s.linesAfter===1?'':'s'}.`,
+  savedMessage: s => `Saved. ${s.updated} line${s.updated===1?'':'s'} updated, ${s.created} added — `
+    + `the catalog now holds ${s.linesAfter}.`,
   confirmBeforeCommit: () => $('#c-mode').value!=='replace' ? true
     : confirm('This wipes the current catalog and every location placed from it, then imports this file. Continue?'),
   after: () => renderCatalog()
@@ -6719,7 +6860,8 @@ function renderCatalog(){
           extra:`<div style="min-width:200px">
             <label style="display:block;font-size:12.5px;font-weight:500;color:var(--ink-2);margin-bottom:5px">If the catalog already has lines</label>
             <select id="c-mode" style="width:100%">
-              <option value="append">Add these to it</option>
+              <option value="update">Update matching SKUs, add the rest</option>
+              <option value="append">Always add as new lines</option>
               <option value="replace">Wipe it and start fresh</option>
             </select></div>`
         })}
@@ -6739,6 +6881,7 @@ function renderCatalog(){
     <h3>Catalog</h3>
     <div class="row" style="margin-top:0">
       <button class="btn quiet" id="c-csv">Download CSV</button>
+      <button class="btn quiet" id="c-dedupe">Merge duplicates</button>
       <button class="btn quiet" id="c-clear">Clear catalog</button>
     </div>
   </div>`;
@@ -6750,6 +6893,15 @@ function renderCatalog(){
     if(catImportOpen) catImporter.wire();
   };
   if(catImportOpen) catImporter.wire();
+
+  $('#c-dedupe').onclick=()=>{
+    const before=(S.catLines||[]).length;
+    if(!before) return toast('Nothing in the catalog yet');
+    const removed=mergeCatalogDuplicates();
+    if(!removed){ toast('No duplicates found'); return; }
+    commit(); renderCatalog();
+    toast(`${removed} duplicate line${removed===1?'':'s'} merged — ${before} down to ${S.catLines.length}`);
+  };
 
   $('#c-clear').onclick=()=>{
     if(!confirm('Delete the entire catalog and remove every location placed from it? Anything scanned in on the Scan tab is left alone.')) return;
