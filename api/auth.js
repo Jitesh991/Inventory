@@ -1,6 +1,6 @@
 import {
   ROLES, loadUsers, saveUsers, hashPassword, verifyPassword, passwordProblem,
-  makeToken, currentUser, publicUser
+  makeToken, currentUser, publicUser, blobToken
 } from './_auth.js';
 
 /**
@@ -10,8 +10,9 @@ import {
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store, max-age=0');
 
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    return res.status(500).json({ error: 'No Blob store is connected. In Vercel: Storage → create a Blob store → connect it to this project, then redeploy.' });
+  if (!blobToken()) {
+    return res.status(500).json({ error: 'No Blob store is connected. Open /api/health to see '
+      + 'which environment variables the function can actually see.' });
   }
 
   const roles = Object.entries(ROLES).map(([id, r]) => ({ id, ...r }));

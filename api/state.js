@@ -1,5 +1,5 @@
 import { put, list } from '@vercel/blob';
-import { requireUser, isAdmin } from './_auth.js';
+import { requireUser, isAdmin, blobToken } from './_auth.js';
 
 /**
  * The entire warehouse map as one JSON document.
@@ -20,7 +20,7 @@ const PATH = 'warehouse/state.json';
 const STRUCTURAL = ['racks', 'assign', 'brands', 'locks', 'kinds', 'labels'];
 
 async function readState() {
-  const { blobs } = await list({ prefix: PATH, limit: 1 });
+  const { blobs } = await list({ prefix: PATH, limit: 1, token: blobToken() });
   const hit = blobs.find(b => b.pathname === PATH);
   if (!hit) return { state: null, savedAt: null };
   const r = await fetch(hit.url, { cache: 'no-store' });
@@ -63,6 +63,7 @@ export default async function handler(req, res) {
 
       const body = JSON.stringify(toSave);
       await put(PATH, body, {
+        token: blobToken(),
         access: 'public',
         contentType: 'application/json',
         addRandomSuffix: false,

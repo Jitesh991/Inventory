@@ -12,6 +12,19 @@ import { scryptSync, randomBytes, timingSafeEqual, createHmac } from 'node:crypt
  */
 
 const USERS_PATH = 'warehouse/users.json';
+
+/**
+ * The Blob token.
+ *
+ * Vercel calls it BLOB_READ_WRITE_TOKEN only when that name is free. Connect a
+ * second store, or set a prefix, and it becomes MYSTORE_READ_WRITE_TOKEN — so
+ * any variable ending that way is accepted rather than insisting on one name.
+ */
+export function blobToken() {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN;
+  const key = Object.keys(process.env).find(k => /_READ_WRITE_TOKEN$/.test(k) && process.env[k]);
+  return key ? process.env[key] : null;
+}
 const TTL_HOURS = 12;
 
 export const ROLES = {
@@ -80,7 +93,7 @@ export function readToken(token) {
 /* ---------------------------- user store --------------------------- */
 
 export async function loadUsers() {
-  const { blobs } = await list({ prefix: USERS_PATH, limit: 1 });
+  const { blobs } = await list({ prefix: USERS_PATH, limit: 1, token: blobToken() });
   const hit = blobs.find(b => b.pathname === USERS_PATH);
   if (!hit) return [];
   const r = await fetch(hit.url, { cache: 'no-store' });
@@ -90,6 +103,7 @@ export async function loadUsers() {
 
 export async function saveUsers(users) {
   await put(USERS_PATH, JSON.stringify(users, null, 2), {
+    token: blobToken(),
     access: 'public',
     contentType: 'application/json',
     addRandomSuffix: false,
@@ -116,8 +130,9 @@ export function publicUser(u) {
 
 /** Guard used by every protected route. Returns the user, or writes the error. */
 export async function requireUser(req, res, { adminOnly = false } = {}) {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    res.status(500).json({ error: 'No Blob store is connected. In Vercel: Storage → create a Blob store → connect it to this project, then redeploy.' });
+  if (!blobToken()) {
+    res.status(500).json({ error: 'No Blob store is connected. Open /api/health to see which '
+      + 'environment variables the function can actually see.' });
     return null;
   }
   let u;
