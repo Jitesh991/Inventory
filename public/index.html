@@ -224,16 +224,20 @@ tbody tr:hover td{background:#faf7f4}
 .rackhead .acts button:disabled{opacity:.4;cursor:not-allowed}
 
 .tip{position:fixed;z-index:60;pointer-events:none;opacity:0;transition:opacity .1s;
-  background:var(--chrome);color:#e9e7e1;border-radius:4px;padding:9px 11px;max-width:330px;
-  box-shadow:0 8px 26px rgba(0,0,0,.34);font-size:11px;line-height:1.5}
+  background:var(--chrome);color:#e9e7e1;border-radius:6px;padding:11px 14px;
+  min-width:340px;max-width:560px;
+  box-shadow:0 8px 26px rgba(0,0,0,.34);font-size:12px;line-height:1.5}
+.tip table{width:100%;table-layout:auto}
 .tip.show{opacity:1}
 .tip .tloc{font-family:var(--mono);font-size:12px;font-weight:700;letter-spacing:.04em}
 .tip .tbr{margin-top:2px;display:flex;gap:5px;flex-wrap:wrap}
 .tip .tbr span{display:inline-flex;align-items:center;gap:4px;font-size:10px;letter-spacing:.04em}
 .tip .tbr i{width:8px;height:8px;border-radius:2px;display:inline-block;box-shadow:inset 0 0 0 1px rgba(255,255,255,.3)}
 .tip table{margin-top:7px;border-top:1px solid #363d44;font-size:11px}
-.tip th,.tip td{border-bottom:1px solid #262c32;padding:3px 6px 3px 0;color:#cfcdc7}
-.tip th{color:#7f868e;font-size:9px}
+.tip th,.tip td{border-bottom:1px solid #262c32;padding:4px 14px 4px 0;color:#cfcdc7;
+  white-space:nowrap;font-size:12px}
+.tip th{color:#7f868e;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase}
+.tip td:first-child,.tip th:first-child{width:99%;white-space:normal;word-break:break-all}
 .tip td.num,.tip th.num{text-align:right;font-family:var(--mono);padding-right:0}
 .tip .tot{margin-top:6px;font-family:var(--mono);font-size:11px;color:var(--sii-sun)}
 .tip .none{margin-top:6px;color:#7f868e;font-style:italic}
@@ -249,12 +253,14 @@ tbody tr:hover td{background:#faf7f4}
   background-image:repeating-linear-gradient(45deg,transparent 0 4px,rgba(0,0,0,.16) 4px 8px)}
 .dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:7px;
   box-shadow:inset 0 0 0 1px rgba(0,0,0,.18);vertical-align:baseline}
-.scanbar{display:grid;grid-template-columns:140px 1fr 88px 150px;gap:10px;align-items:end}
+.scanbar{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;align-items:end}
+.scanbar select,.scanbar input{width:100%}
 .unitpick{display:flex;gap:4px}
 .unitpick button{flex:1;padding:9px 4px;border:1px solid var(--line-2);background:#fff;
   border-radius:7px;font:500 12.5px var(--sans);color:var(--ink-2)}
 .unitpick button.on{background:var(--king);border-color:var(--king);color:#fff}
 @media (max-width:900px){.scanbar{grid-template-columns:1fr 1fr}}
+.tip .none{margin-top:6px;color:#7f868e;font-style:italic}
 .fld{display:flex;flex-direction:column;gap:4px}
 .fld label{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-2)}
 .fld input{padding:9px 10px;border:1px solid var(--line-hard);border-radius:3px;background:#fff;font-family:var(--mono);font-size:15px}
@@ -467,7 +473,8 @@ async function flush(){
 function commitLocal(){ renderRail(); renderMap(); renderSummary(); }
 
 window.addEventListener('beforeunload',e=>{
-  if(document.getElementById('savestate')?.dataset.s==='dirty'){ e.preventDefault(); e.returnValue=''; }
+  const dirty=document.getElementById('savestate')?.dataset.s==='dirty';
+  if(dirty||(typeof scanPending!=='undefined'&&scanPending.length)){ e.preventDefault(); e.returnValue=''; }
 });
 
 function saveState(st,msg){
@@ -5995,138 +6002,185 @@ function splitBrands(s){
 /* ============================================================
    Scan
    ============================================================ */
-let scanLoc='', scanSession=[], camStream=null;
+let scanLoc='', scanRack='', camStream=null;
+/* Scanned lines wait here until Save. Nothing below this point writes to the
+   map on its own. */
+let scanPending=[], savedThisSession=[];
 /* 'box' means the number typed is cartons; 'piece' means loose units. Set from
    which barcode matched, and overridable — the picker can always see which the
    tool thinks it is before the count is written. */
 let scanUnit='box';
 function renderScan(){
   const supported = 'BarcodeDetector' in window;
+  const racks=Object.keys(S.racks).sort(sortRacks);
+  if(scanRack && !S.racks[scanRack]) scanRack='';
+  if(!scanRack && racks.length) scanRack=racks[0];
+
   $('#p-scan').innerHTML=`
   <h2>Scan</h2>
-  <p class="lead">Set the slot you are standing at, then scan. A handheld scanner types the code and presses Enter, so it lands straight in the box below — keep the cursor there and keep scanning.
-  You can also type a SKU by hand. Catalogue holds ${BY_CODE.size.toLocaleString()} barcodes across ${BY_SKU.size.toLocaleString()} SKUs.</p>
+  <p class="lead">Pick the slot, scan, set how many, and add it to the list. Nothing reaches the map
+  until you press <strong>Save</strong>, so a mis-scan is just a row to delete.
+  Catalogue holds ${BY_CODE.size.toLocaleString()} barcodes across ${BY_SKU.size.toLocaleString()} SKUs.</p>
 
   <div class="card">
     <div class="scanbar">
-      <div class="fld"><label>Slot</label>
-        <input type="text" id="s-loc" placeholder="A4.1" value="${scanLoc}" style="text-transform:uppercase"></div>
-      <div class="fld"><label>Scan barcode or type SKU</label>
+      <div class="fld"><label>Rack</label>
+        <select id="s-rack">${racks.map(r=>`<option value="${esc(r)}" ${r===scanRack?'selected':''}>${
+          esc(isFloor(r)?rackName(r):'Rack '+r)}</option>`).join('')}</select></div>
+      <div class="fld"><label>Slot</label><select id="s-slot"></select></div>
+      <div class="fld" style="grid-column:span 2"><label>Scan barcode or type a SKU</label>
         <input type="text" id="s-code" placeholder="waiting for scan…" autocomplete="off"></div>
-      <div class="fld"><label id="s-countlabel">Boxes</label>
-        <input type="number" id="s-boxes" value="1" min="0" step="1"></div>
       <div class="fld"><label>Counting</label>
-        <div class="unitpick">
-          <button type="button" data-unit="box" class="on">Boxes</button>
-          <button type="button" data-unit="piece">Pieces</button>
-        </div></div>
+        <select id="s-unit">
+          <option value="box" ${scanUnit==='box'?'selected':''}>Boxes</option>
+          <option value="piece" ${scanUnit==='piece'?'selected':''}>Pieces</option>
+        </select></div>
+      <div class="fld"><label id="s-countlabel">${scanUnit==='box'?'Boxes':'Pieces'}</label>
+        <input type="number" id="s-count" value="1" min="0" step="1"></div>
     </div>
     <div class="row">
-      <label><input type="checkbox" id="s-merge" checked> Add to the same SKU if already at this slot</label>
-      ${supported?'<button class="btn ghost" id="s-cam">Use camera</button>':'<span class="mini" style="color:var(--ink-2)">Camera scanning needs Chrome on Android or desktop; handheld scanners work anywhere.</span>'}
+      ${supported?'<button class="btn ghost" id="s-cam">Use camera</button>':
+        '<span class="mini" style="color:var(--ink-2)">Camera scanning needs Chrome on Android or desktop; handheld scanners work anywhere.</span>'}
     </div>
-    <video id="s-video" class="hidden" style="width:100%;max-width:420px;margin-top:12px;border-radius:4px;background:#000" muted playsinline></video>
+    <video id="s-video" class="hidden" style="width:100%;max-width:420px;margin-top:12px;border-radius:6px;background:#000" muted playsinline></video>
     <div id="s-hit"></div>
   </div>
 
-  <div class="card">
-    <h3>This session <span style="float:right;font-family:var(--mono);font-weight:400;text-transform:none;letter-spacing:0">${scanSession.length} scan${scanSession.length===1?'':'s'}</span></h3>
-    ${scanSession.length?`<div class="scanlog"><table><thead><tr><th>Slot</th><th>SKU</th><th class="num">Boxes</th><th class="num">Pack</th><th class="num">Total</th><th></th></tr></thead><tbody>
-      ${scanSession.slice().reverse().map((e,i)=>`<tr${i===0?' class="new"':''}>
-        <td style="font-family:var(--mono)">${e.loc}</td>
-        <td style="font-family:var(--mono)">${esc(e.sku)}</td>
-        <td class="num">${e.boxes??'—'}</td><td class="num">${e.packing??'—'}</td>
-        <td class="num">${e.qty.toLocaleString()}${e.unit==='piece'?' <span style="color:var(--ink-3);font-size:10px">pcs</span>':''}</td>
-        <td style="text-align:right"><button class="btn ghost" data-undo="${scanSession.length-1-i}" style="padding:2px 8px">Undo</button></td></tr>`).join('')}
-      </tbody></table></div>
-      <div class="row"><button class="btn ghost" id="s-clearlog">Clear session list</button></div>`
-      :'<p class="lead" style="margin:0">Nothing scanned yet. The list here is just a record of this session — every scan is already saved to the slot.</p>'}
-  </div>`;
+  <div class="card" style="${scanPending.length?'border-color:var(--king)':''}">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">To be saved</h3>
+      <span class="pill ${scanPending.length?'warn':'ok'}">${scanPending.length
+        ? `${scanPending.length} line${scanPending.length===1?'':'s'} not saved yet` : 'nothing waiting'}</span>
+      <span style="flex:1"></span>
+      ${scanPending.length?`<button class="btn quiet" id="s-discard">Discard all</button>
+        <button class="btn" id="s-save">Save ${scanPending.length} to the map</button>`:''}
+    </div>
+    ${scanPending.length?`<div class="scroll" style="margin-top:12px"><table>
+      <thead><tr><th>Slot</th><th>SKU</th><th>Scanned</th><th class="num">Count</th>
+        <th class="num">Pack</th><th class="num">Pieces</th><th></th></tr></thead>
+      <tbody>${scanPending.map((e,i)=>`<tr>
+        <td class="mono">${esc(e.loc)}</td>
+        <td class="mono">${esc(e.sku)}</td>
+        <td><span class="pill ${e.matched==='box'?'ok':e.matched==='item'?'warn':''}">${
+          e.matched==='box'?'box':e.matched==='item'?'item':'typed'}</span></td>
+        <td class="num">${e.count} ${e.unit==='box'?'box':'pc'}${e.count===1?'':'es'.slice(e.unit==='box'?0:1)}</td>
+        <td class="num">${e.packing??'—'}</td>
+        <td class="num">${e.qty.toLocaleString()}</td>
+        <td style="text-align:right"><button class="btn quiet" data-pdel="${i}" style="padding:2px 8px">Remove</button></td>
+      </tr>`).join('')}</tbody>
+      <tfoot><tr style="background:var(--porcelain)">
+        <td colspan="5" style="font-weight:600">${scanPending.length} line${scanPending.length===1?'':'s'}</td>
+        <td class="num" style="font-weight:600">${scanPending.reduce((a,e)=>a+e.qty,0).toLocaleString()}</td>
+        <td></td></tr></tfoot></table></div>`
+      : '<p class="lead" style="margin:10px 0 0">Scanned lines collect here. They only reach the map when you save.</p>'}
+    <div id="s-savelog" class="log hidden"></div>
+  </div>
 
+  ${savedThisSession.length?`<div class="card">
+    <h3>Saved this session <span style="float:right;font-family:var(--mono);font-weight:400;text-transform:none;letter-spacing:0">${
+      savedThisSession.length} line${savedThisSession.length===1?'':'s'}</span></h3>
+    <div class="scroll cap"><table><thead><tr><th>Slot</th><th>SKU</th><th class="num">Pieces</th></tr></thead>
+    <tbody>${savedThisSession.slice().reverse().slice(0,50).map(e=>`<tr>
+      <td class="mono">${esc(e.loc)}</td><td class="mono">${esc(e.sku)}</td>
+      <td class="num">${e.qty.toLocaleString()}</td></tr>`).join('')}</tbody></table></div>
+  </div>`:''}`;
+
+  drawSlotOptions();
   const code=$('#s-code');
-  $('#s-loc').oninput=e=>{ scanLoc=e.target.value.toUpperCase().replace(/\s+/g,''); e.target.value=scanLoc; };
-  code.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); takeScan(code.value); code.value=''; } };
-  $('#s-boxes').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); code.focus(); } };
-  $('#p-scan').querySelectorAll('[data-unit]').forEach(b=>b.onclick=()=>setScanUnit(b.dataset.unit,true));
-  setScanUnit(scanUnit,false);
-  $('#s-clearlog')&&($('#s-clearlog').onclick=()=>{ scanSession=[]; renderScan(); });
-  $('#p-scan').querySelectorAll('[data-undo]').forEach(b=>b.onclick=()=>undoScan(+b.dataset.undo));
+  $('#s-rack').onchange=e=>{ scanRack=e.target.value; scanLoc=''; drawSlotOptions(); code.focus(); };
+  $('#s-slot').onchange=e=>{ scanLoc=e.target.value; code.focus(); };
+  $('#s-unit').onchange=e=>setScanUnit(e.target.value,true);
+  code.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); stageScan(code.value); code.value=''; } };
+  $('#s-count').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); code.focus(); } };
+  $('#s-save')&&($('#s-save').onclick=saveStaged);
+  $('#s-discard')&&($('#s-discard').onclick=()=>{
+    if(!confirm(`Discard ${scanPending.length} unsaved line${scanPending.length===1?'':'s'}?`)) return;
+    scanPending=[]; renderScan();
+  });
+  $('#p-scan').querySelectorAll('[data-pdel]').forEach(b=>b.onclick=()=>{
+    scanPending.splice(+b.dataset.pdel,1); renderScan();
+  });
   if(supported) $('#s-cam').onclick=toggleCam;
   code.focus();
 }
+
+/** Slots for the chosen rack, in the order they run along the aisle. */
+function drawSlotOptions(){
+  const sel=$('#s-slot');
+  if(!sel) return;
+  const r=scanRack;
+  const out=[];
+  if(r&&S.racks[r]){
+    Object.keys(S.racks[r]).map(Number).sort((a,b)=>a-b).forEach(bay=>{
+      S.racks[r][bay].slice().sort((a,b)=>a-b).forEach(l=>{
+        const loc=`${r}${bay}.${l}`;
+        const brands=(S.assign[loc]||[]).join(' & ');
+        out.push(`<option value="${esc(loc)}" ${loc===scanLoc?'selected':''}>${
+          esc(loc)}${brands?' — '+esc(brands):''}</option>`);
+      });
+    });
+  }
+  sel.innerHTML = out.length?out.join(''):'<option value="">no slots in this rack</option>';
+  if(!scanLoc||!out.some(o=>o.includes(`value="${scanLoc}"`))) scanLoc=sel.value||'';
+}
+
 function showHit(html,cls){ $('#s-hit').innerHTML=`<div class="hit-card ${cls||''}">${html}</div>`; }
 
 function setScanUnit(u,focusBack){
   scanUnit = u==='piece' ? 'piece' : 'box';
-  $('#p-scan')?.querySelectorAll('[data-unit]').forEach(b=>
-    b.classList.toggle('on', b.dataset.unit===scanUnit));
+  const sel=$('#s-unit'); if(sel) sel.value=scanUnit;
   const lab=$('#s-countlabel');
   if(lab) lab.textContent = scanUnit==='box' ? 'Boxes' : 'Pieces';
   if(focusBack) $('#s-code')?.focus();
 }
 
-function takeScan(raw){
+/**
+ * Work out what a scan means and put it on the list. Deliberately does not
+ * touch S.inv — everything waits for Save, so a wrong scan costs a click
+ * rather than needing an undo against live data.
+ */
+function stageScan(raw){
   const loc=(scanLoc||'').toUpperCase();
   const m=loc.match(/^([A-Z]{1,3})(\d+)\.(\d+)$/);
-  if(!m){ showHit('<div class="hit-sku">No slot set</div><div class="hit-meta">Type the slot you are at, for example A4.1, then scan again.</div>','miss'); $('#s-loc').focus(); return; }
-  const rk=m[1], bay=m[2], layer=+m[3];
-  if(isLocked(rk)){ showHit(`<div class="hit-sku">Rack ${rk} is locked</div><div class="hit-meta">Unlock it on the map before adding stock.</div>`,'miss'); return; }
+  if(!m){ showHit('<div class="hit-sku">No slot chosen</div><div class="hit-meta">Pick a rack and slot above, then scan.</div>','miss'); return; }
+  const rk=m[1];
+  if(isLocked(rk)){ showHit(`<div class="hit-sku">${rackName(rk)} is locked</div><div class="hit-meta">Unlock it on the map before adding stock.</div>`,'miss'); return; }
 
   const rec=lookup(raw);
   if(!rec){
     showHit(`<div class="hit-sku">${esc(String(raw).trim())}</div>
       <div class="hit-meta">Not in the catalogue</div>
-      <div class="hit-note">Nothing was recorded. Check the code, or add this line by hand on the Inventory tab.</div>`,'miss');
+      <div class="hit-note">Nothing was added. Check the code, or add the SKU on the Catalog tab.</div>`,'miss');
     return;
   }
-  // The barcode decides how to read the number: a box code means cartons, an
-  // item code means loose pieces. A typed SKU tells us nothing, so whatever the
-  // toggle already says stands.
+
   if(rec.matched==='box') setScanUnit('box',false);
   else if(rec.matched==='item') setScanUnit('piece',false);
 
-  const count=Math.max(0,parseFloat($('#s-boxes').value)||0);
+  const count=Math.max(0,parseFloat($('#s-count').value)||0);
   const packing=rec.packing;
   if(scanUnit==='box'&&packing==null){
     showHit(`<div class="hit-sku">${esc(rec.sku)}</div>
       <div class="hit-meta"><span>${esc(rec.brand||'no brand')}</span><span>no pack size on file</span></div>
-      <div class="hit-note">Nothing was recorded — counting boxes needs a pack size to work out
-      the pieces. Switch <strong>Counting</strong> to Pieces, or add the packing on the Catalog tab.</div>`,'miss');
+      <div class="hit-note">Not added — counting boxes needs a pack size. Switch <strong>Counting</strong>
+      to Pieces, or set the packing on the Catalog tab.</div>`,'miss');
     return;
   }
-  const boxes = scanUnit==='box' ? count : null;
-  const qty   = scanUnit==='box' ? count*packing : count;
+  if(!count){ showHit('<div class="hit-sku">Count is zero</div><div class="hit-meta">Set how many, then scan again.</div>','miss'); return; }
 
-  if(!S.racks[rk]) S.racks[rk]={};
-  const arr=S.racks[rk][bay]||[];
-  let created=false;
-  if(!arr.includes(layer)){ S.racks[rk][bay]=[...arr,layer].sort((a,b)=>a-b); created=true; }
+  const qty = scanUnit==='box' ? count*packing : count;
+  scanPending.push({ loc, sku:rec.sku, brand:rec.brand, unit:scanUnit, count, packing,
+    boxes: scanUnit==='box'?count:null, qty, matched:rec.matched });
 
-  S.inv[loc]=S.inv[loc]||[];
-  let merged=false;
-  if($('#s-merge').checked){
-    const ex=S.inv[loc].find(x=>x.sku===rec.sku);
-    if(ex){
-      if(boxes!=null) ex.boxes=(+ex.boxes||0)+boxes;
-      if(packing!=null) ex.packing=packing;
-      ex.qty=(+ex.qty||0)+qty;
-      merged=true;
-    }
-  }
-  if(!merged) S.inv[loc].push({sku:rec.sku,boxes,packing,qty});
-  scanSession.push({loc,sku:rec.sku,boxes,packing,qty,merged,unit:scanUnit});
-
-  // does the stock match what this slot is mapped to?
   const mapped=S.assign[loc]||[];
   let note='';
   if(rec.brand&&mapped.length&&!mapped.includes(rec.brand))
-    note=`<div class="hit-note">This slot is mapped to ${mapped.join(' & ')}, but the SKU is ${esc(rec.brand)}. Recorded anyway — worth a look.</div>`;
+    note=`<div class="hit-note">This slot is mapped to ${mapped.join(' & ')}, but the SKU is ${esc(rec.brand)}. Added anyway — worth a look.</div>`;
   else if(rec.brand&&!mapped.length)
-    note=`<div class="hit-note">This slot has no brand set. Recorded anyway.</div>`;
-  if(created) note+=`<div class="hit-note">Slot ${loc} did not exist and was created.</div>`;
+    note=`<div class="hit-note">This slot has no brand set.</div>`;
 
   const pic=(catInfo(rec.sku)||{}).imageUrl;
-  showHit(`${pic?`<img src="${esc(pic)}" alt="" onerror="this.style.display='none'"
+  const card=`${pic?`<img src="${esc(pic)}" alt="" onerror="this.style.display='none'"
       style="float:right;width:64px;height:64px;object-fit:contain;border-radius:6px;
       background:#fff;border:1px solid var(--line);margin-left:12px">`:''}
     <div class="hit-sku">${esc(rec.sku)}</div>
@@ -6134,28 +6188,58 @@ function takeScan(raw){
       <span>${esc(rec.brand||'no brand')}</span>
       <span>${loc}</span>
       <span class="pill ${rec.matched==='box'?'ok':rec.matched==='item'?'warn':''}">${
-        rec.matched==='box' ? 'box barcode' : rec.matched==='item' ? 'item barcode' : 'typed SKU'}</span>
+        rec.matched==='box'?'box barcode':rec.matched==='item'?'item barcode':'typed SKU'}</span>
       <span class="big">${scanUnit==='box'
         ? `${count} × ${packing} = ${qty.toLocaleString()} pcs`
         : `${qty.toLocaleString()} pc${qty===1?'':'s'}`}</span>
-      ${merged?'<span>added to existing line</span>':''}
-    </div>${note}`, note?'warn':'');
+    </div>${note}`;
 
-  commit(); renderScan();
+  renderScan();            // redraw the waiting list
+  showHit(card, note?'warn':'');
 }
-function undoScan(i){
-  const e=scanSession[i]; if(!e) return;
-  const list=S.inv[e.loc]||[];
-  const line=list.find(x=>x.sku===e.sku);
-  if(line){
-    if(e.boxes!=null) line.boxes=(+line.boxes||0)-e.boxes;
-    line.qty=(+line.qty||0)-e.qty;
-    if(line.qty<=0||line.boxes<=0) S.inv[e.loc]=list.filter(x=>x!==line);
-    if(!S.inv[e.loc].length) delete S.inv[e.loc];
+
+/** Write every waiting line to the map, in one go. */
+function saveStaged(){
+  if(!scanPending.length) return;
+  const blocked=[];
+  let written=0;
+
+  scanPending.forEach(e=>{
+    const m=e.loc.match(/^([A-Z]{1,3})(\d+)\.(\d+)$/);
+    if(!m) return;
+    const rk=m[1], bay=m[2], layer=+m[3];
+    if(isLocked(rk)){ blocked.push(e.loc); return; }
+
+    if(!S.racks[rk]) S.racks[rk]={};
+    const arr=S.racks[rk][bay]||[];
+    if(!arr.includes(layer)) S.racks[rk][bay]=[...arr,layer].sort((a,b)=>a-b);
+
+    S.inv[e.loc]=S.inv[e.loc]||[];
+    const ex=S.inv[e.loc].find(x=>x.sku===e.sku);
+    if(ex){
+      if(e.boxes!=null) ex.boxes=(+ex.boxes||0)+e.boxes;
+      if(e.packing!=null) ex.packing=e.packing;
+      ex.qty=(+ex.qty||0)+e.qty;
+    } else {
+      S.inv[e.loc].push({sku:e.sku,boxes:e.boxes,packing:e.packing,qty:e.qty});
+    }
+    savedThisSession.push({loc:e.loc,sku:e.sku,qty:e.qty});
+    written++;
+  });
+
+  scanPending = blocked.length ? scanPending.filter(e=>blocked.includes(e.loc)) : [];
+  commit();
+  renderScan();
+  const log=$('#s-savelog');
+  if(log){
+    log.classList.remove('hidden');
+    log.textContent = `${written} line${written===1?'':'s'} saved to the map.`
+      + (blocked.length?`\n${blocked.length} left waiting — ${[...new Set(blocked)].join(', ')} `
+        +'is locked.':'');
   }
-  scanSession.splice(i,1);
-  commit(); renderScan(); toast(`Undid ${e.sku} at ${e.loc}`);
+  toast(`${written} line${written===1?'':'s'} saved`);
 }
+
 async function toggleCam(){
   const v=$('#s-video'), btn=$('#s-cam');
   if(camStream){
@@ -6957,6 +7041,7 @@ function renderCatalog(){
     <div class="row" style="margin-top:0">
       <button class="btn quiet" id="c-csv">Download CSV</button>
       <button class="btn quiet" id="c-dedupe">Merge duplicates</button>
+      <button class="btn quiet" id="c-tobox">Item UPC → Box UPC</button>
       <button class="btn quiet" id="c-clear">Clear catalog</button>
     </div>
   </div>`;
@@ -6968,6 +7053,21 @@ function renderCatalog(){
     if(catImportOpen) catImporter.wire();
   };
   if(catImportOpen) catImporter.wire();
+
+  /* The first import predated the box/item split, so everything landed in the
+     item field. This moves those codes across, and only where the box field is
+     still empty, so it cannot overwrite anything entered since. */
+  $('#c-tobox').onclick=()=>{
+    const lines=S.catLines||[];
+    const movable=lines.filter(l=>l.upc&&!l.boxUpc);
+    if(!movable.length) return toast('Nothing to move — no item UPCs without a box UPC');
+    if(!confirm(`Treat ${movable.length} existing UPC${movable.length===1?'':'s'} as box barcodes?\n\n`
+      +'They move from the item field to the box field. The item field is left blank, ready for '
+      +'the single-piece barcodes when you have them.')) return;
+    movable.forEach(l=>{ l.boxUpc=l.upc; l.upc=''; });
+    commit(); renderCatalog();
+    toast(`${movable.length} code${movable.length===1?'':'s'} moved to Box UPC`);
+  };
 
   $('#c-dedupe').onclick=()=>{
     const before=(S.catLines||[]).length;
