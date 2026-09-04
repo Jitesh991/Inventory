@@ -6053,8 +6053,6 @@ function renderScan(){
         <select id="s-rack">${racks.map(r=>`<option value="${esc(r)}" ${r===scanRack?'selected':''}>${
           esc(isFloor(r)?rackName(r):'Rack '+r)}</option>`).join('')}</select></div>
       <div class="fld"><label>Slot</label><select id="s-slot"></select></div>
-      <div class="fld"><label>Scan barcode or type a SKU</label>
-        <input type="text" id="s-code" placeholder="waiting for scan…" autocomplete="off"></div>
       <div class="fld"><label>Counting</label>
         <select id="s-unit">
           <option value="box" ${scanUnit==='box'?'selected':''}>Boxes</option>
@@ -6062,6 +6060,8 @@ function renderScan(){
         </select></div>
       <div class="fld"><label id="s-countlabel">${scanUnit==='box'?'Boxes':'Pieces'}</label>
         <input type="number" id="s-count" value="1" min="0" step="1"></div>
+      <div class="fld"><label>Scan barcode or type a SKU</label>
+        <input type="text" id="s-code" placeholder="waiting for scan…" autocomplete="off"></div>
     </div>
     <div class="row">
       ${supported?'<button class="btn ghost" id="s-cam">Use camera</button>':
@@ -6179,8 +6179,12 @@ function stageScan(raw){
     return;
   }
 
-  if(rec.matched==='box') setScanUnit('box',false);
-  else if(rec.matched==='item') setScanUnit('piece',false);
+  // What you picked in Counting is what gets recorded. The barcode type is
+  // reported, and flagged when the two disagree, but it never silently
+  // overrides the choice — doing that turned a deliberate "Boxes" into pieces.
+  const mismatch =
+    (rec.matched==='item' && scanUnit==='box')  ? 'an item barcode while counting boxes' :
+    (rec.matched==='box'  && scanUnit==='piece')? 'a box barcode while counting pieces'  : '';
 
   const count=Math.max(0,parseFloat($('#s-count').value)||0);
   const packing=rec.packing;
@@ -6199,10 +6203,15 @@ function stageScan(raw){
 
   const mapped=S.assign[loc]||[];
   let note='';
+  if(mismatch)
+    note+=`<div class="hit-note">You scanned ${mismatch}. Recorded as
+      <strong>${scanUnit==='box'?`${count} box${count===1?'':'es'} = ${qty.toLocaleString()} pcs`
+        :`${qty.toLocaleString()} piece${qty===1?'':'s'}`}</strong>, as set above. Change
+      <strong>Counting</strong> and remove the line if that is not what you meant.</div>`;
   if(rec.brand&&mapped.length&&!mapped.includes(rec.brand))
-    note=`<div class="hit-note">This slot is mapped to ${mapped.join(' & ')}, but the SKU is ${esc(rec.brand)}. Added anyway — worth a look.</div>`;
+    note+=`<div class="hit-note">This slot is mapped to ${mapped.join(' & ')}, but the SKU is ${esc(rec.brand)}. Added anyway — worth a look.</div>`;
   else if(rec.brand&&!mapped.length)
-    note=`<div class="hit-note">This slot has no brand set.</div>`;
+    note+=`<div class="hit-note">This slot has no brand set.</div>`;
 
   const pic=(catInfo(rec.sku)||{}).imageUrl;
   const card=`${pic?`<img src="${esc(pic)}" alt="" onerror="this.style.display='none'"
