@@ -6027,6 +6027,7 @@ function splitBrands(s){
    Scan
    ============================================================ */
 let scanLoc='', scanRack='', camStream=null;
+let invImportOpen=false;
 /* Scanned lines wait here until Save. Nothing below this point writes to the
    map on its own. */
 let scanPending=[], savedThisSession=[];
@@ -7282,8 +7283,14 @@ function renderInv(){
   <p class="lead">What is physically sitting in each slot. This is what the hover card on the map reads from.
   ${lines?`Currently ${lines} line${lines===1?'':'s'} across ${locs.length} slot${locs.length===1?'':'s'}, ${bxs.toLocaleString()} boxes, ${pcs.toLocaleString()} pcs.`:'Nothing recorded yet.'}</p>
 
-  <div class="card">
-    <h3>Import a count sheet</h3>
+  <div class="card" style="padding-top:16px;padding-bottom:16px">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Import a count sheet</h3>
+      <span style="font-size:12.5px;color:var(--ink-2)">Bulk-load counts from a spreadsheet.</span>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="i-toggle">${invImportOpen?'Close':'Open'}</button>
+    </div>
+    <div id="i-importwrap" class="${invImportOpen?'':'hidden'}" style="margin-top:16px">
     <p class="lead" style="margin:0 0 10px">Columns, in this order:
     <span style="font-family:var(--mono)">Location, SKU, Boxes, Packing, Total</span>.
     Leave Total blank and it is worked out as boxes × packing. A header row is skipped if there is one.
@@ -7306,18 +7313,33 @@ C13.1,UG-8801,10,6,"></textarea>
       <button class="btn ghost" id="i-clear">Clear all inventory</button>
     </div>
     <div class="log" id="i-log"></div>
+    </div>
   </div>
 
   <div class="card">
     <h3>Recorded slots</h3>
-    ${locs.length?`<table><thead><tr><th>Location</th><th>Brands</th><th class="num">SKUs</th><th class="num">Boxes</th><th class="num">Total</th><th></th></tr></thead><tbody>
-      ${locs.map(k=>`<tr><td style="font-family:var(--mono)">${k}</td>
-        <td>${(S.assign[k]||[]).join(' & ')||'<span style="color:var(--ink-2)">—</span>'}</td>
-        <td class="num">${S.inv[k].length}</td>
-        <td class="num">${boxesOf(k).toLocaleString()}</td>
-        <td class="num">${qtyOf(k).toLocaleString()}</td>
-        <td style="text-align:right"><button class="btn ghost" data-invdel="${k}" style="padding:2px 8px">Remove</button></td></tr>`).join('')}
-      </tbody></table>`:'<p class="lead" style="margin:0">No slots carry inventory yet.</p>'}
+    ${locs.length?`<div class="scroll cap"><table>
+      <thead><tr><th>Location</th><th>SKU</th><th>Brands</th><th class="num">Boxes</th>
+        <th class="num">Pieces</th><th></th></tr></thead><tbody>
+      ${locs.map(k=>{
+        const rows=S.inv[k];
+        const brands=(S.assign[k]||[]).join(' & ')||'<span style="color:var(--ink-2)">—</span>';
+        return rows.map((line,i)=>`<tr${i===0&&locs.indexOf(k)>0?' style="border-top:2px solid var(--line-2)"':''}>
+          <td style="font-family:var(--mono)">${i===0?k:''}</td>
+          <td style="font-family:var(--mono)">${esc(line.sku||'—')}</td>
+          <td>${i===0?brands:''}</td>
+          <td class="num">${line.boxes!=null?(+line.boxes).toLocaleString():'—'}</td>
+          <td class="num">${(+line.qty||0).toLocaleString()}</td>
+          <td style="text-align:right;white-space:nowrap">
+            <button class="btn quiet" data-linedel="${esc(k)}|${i}" style="padding:2px 8px">Remove</button>
+            ${i===0&&rows.length>1?`<button class="btn ghost" data-invdel="${esc(k)}" style="padding:2px 8px">All ${rows.length}</button>`:''}
+          </td></tr>`).join('')
+        + (rows.length>1?`<tr style="background:var(--porcelain)">
+            <td></td><td colspan="2" style="font-size:12px;color:var(--ink-2)">${k} total</td>
+            <td class="num" style="font-weight:600">${boxesOf(k).toLocaleString()}</td>
+            <td class="num" style="font-weight:600">${qtyOf(k).toLocaleString()}</td><td></td></tr>`:'');
+      }).join('')}
+      </tbody></table></div>`:'<p class="lead" style="margin:0">No slots carry inventory yet.</p>'}
   </div>
 
   <div class="card">
@@ -7327,6 +7349,11 @@ C13.1,UG-8801,10,6,"></textarea>
         :'<p class="lead" style="margin:0">None — every slot with stock has a brand.</p>';})()}
   </div>`;
 
+  $('#i-toggle').onclick=()=>{
+    invImportOpen=!invImportOpen;
+    $('#i-importwrap').classList.toggle('hidden',!invImportOpen);
+    $('#i-toggle').textContent=invImportOpen?'Close':'Open';
+  };
   $('#i-apply').onclick=()=>importInv($('#i-text').value);
   $('#i-file').onchange=e=>{
     const f=e.target.files[0]; if(!f) return;
@@ -7338,7 +7365,23 @@ C13.1,UG-8801,10,6,"></textarea>
   $('#i-clear').onclick=()=>{ if(!confirm('Delete every inventory line? Brand assignments stay.')) return;
     S.inv={}; commit(); renderInv(); toast('Inventory cleared'); };
   $('#p-inv').querySelectorAll('[data-invdel]').forEach(b=>b.onclick=()=>{
-    delete S.inv[b.dataset.invdel]; commit(); renderInv();
+    const k=b.dataset.invdel;
+    if(!confirm(`Remove all ${S.inv[k].length} lines at ${k}?`)) return;
+    delete S.inv[k]; commit(); renderInv();
+  });
+  // Removing one SKU rather than the whole slot, which is what a miscount
+  // usually needs.
+  $('#p-inv').querySelectorAll('[data-linedel]').forEach(b=>b.onclick=()=>{
+    const [k,i]=b.dataset.linedel.split('|');
+    const line=S.inv[k]?.[+i];
+    if(!line) return;
+    if(line._catId){
+      const cat=(S.catLines||[]).find(x=>x.id===line._catId);
+      if(cat) cat.loc='';
+    }
+    S.inv[k].splice(+i,1);
+    if(!S.inv[k].length) delete S.inv[k];
+    commit(); renderInv();
   });
 }
 function sortLoc(a,b){
