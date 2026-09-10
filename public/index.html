@@ -156,8 +156,13 @@ body.scanner .cell{cursor:default}
 .lcell{width:34px;justify-content:flex-end;padding-right:7px}
 .lcell.clickable:hover{color:var(--ink);text-decoration:underline;cursor:pointer}
 
-.cell{position:relative;height:40px;border:1px solid var(--line);border-radius:2px;background:#fff;overflow:hidden;cursor:crosshair;display:flex;align-items:center;justify-content:center}
-.cell .tag{position:relative;font-family:var(--mono);font-size:9px;line-height:1.15;text-align:center;padding:0 2px;pointer-events:none;letter-spacing:.02em}
+.cell{position:relative;height:44px;border:1px solid var(--line);border-radius:3px;background:#fff;overflow:hidden;cursor:crosshair;display:flex;align-items:center;justify-content:center}
+.cell .tag{position:relative;font-family:var(--mono);font-size:9.5px;line-height:1.12;
+  text-align:center;padding:0 3px;pointer-events:none;letter-spacing:0;
+  display:flex;flex-direction:column;gap:1px;max-width:100%}
+/* Each brand on its own line, clipped rather than wrapped mid-word, so a
+   two-brand slot reads as two names instead of one run-on string. */
+.cell .tag b{font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:86px}
 .cell .pos{position:absolute;top:1px;left:3px;font-family:var(--mono);font-size:8px;color:rgba(0,0,0,.3);pointer-events:none}
 .cell.void{background:var(--void);border-color:#bcb8ad;cursor:not-allowed;
   background-image:repeating-linear-gradient(45deg,transparent 0 5px,rgba(0,0,0,.055) 5px 10px)}
@@ -292,10 +297,10 @@ tbody tr:hover td{background:#faf7f4}
 .hcell.pal{font-size:9px;letter-spacing:.06em;color:#8a6a3d}
 .cell.pltcell{border-style:dashed;border-width:2px;border-color:#b9b3a4}
 .cell.pltcell .pos{display:none}
-.nocell{height:40px}
+.nocell{height:44px}
 .rack.floorarea{border-style:dashed}
 .rack.floorarea .rackhead{background:#e5e1d6}
-.rack.floorarea .cell{height:52px}
+.rack.floorarea .cell{height:56px}
 .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--chrome);color:#fff;padding:9px 17px;border-radius:4px;font-size:12px;opacity:0;pointer-events:none;transition:opacity .18s;z-index:50;box-shadow:0 6px 22px rgba(0,0,0,.28)}
 .toast.show{opacity:1}
 .hidden{display:none!important}
@@ -5687,7 +5692,7 @@ function rackEl(r){
   const g=el('div','grid');
   const palBays = palOf(r);
   const pal = palBays.length ? 'LC'+r : null;
-  g.style.gridTemplateColumns=`34px repeat(${maxBay},${floor?96:58}px)`
+  g.style.gridTemplateColumns=`34px repeat(${maxBay},${floor?104:92}px)`
     + (pal?` 14px repeat(${palBays.length},82px)`:'');
 
   g.append(el('div','hcell'));
@@ -5740,9 +5745,10 @@ function cellEl(r,b,l){
       d.style.background = cols.length===1 ? cols[0]
         : `linear-gradient(180deg,${cols.map((c,i)=>`${c} ${i*100/cols.length}%,${c} ${(i+1)*100/cols.length}%`).join(',')})`;
       const tag=el('span','tag');
-      tag.textContent=list.map(abbr).join('·');
+      // Full names now that there is room; only genuinely long ones get cut,
+      // and the hover card always shows them in full.
+      tag.innerHTML=list.map(n=>`<b>${esc(n)}</b>`).join('');
       tag.style.color=readable(cols[0]);
-      tag.style.fontWeight='600';
       d.append(tag);
       pos.style.color = readable(cols[0])==='#ffffff' ? 'rgba(255,255,255,.55)' : 'rgba(0,0,0,.38)';
     }
