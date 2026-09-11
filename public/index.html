@@ -424,6 +424,7 @@ tbody tr:hover td{background:#faf7f4}
         <button data-tab="catalog">Catalog</button>
         <button data-tab="scan">Scan</button>
         <button data-tab="inv">Inventory</button>
+        <button data-tab="orders">Orders</button>
         <button data-tab="pullout">Pullout</button>
         <button data-tab="summary">Dashboard</button>
         <button data-tab="racks">Rack setup</button>
@@ -443,6 +444,7 @@ tbody tr:hover td{background:#faf7f4}
     <div class="panel hidden" id="p-catalog"></div>
     <div class="panel hidden" id="p-scan"></div>
       <div class="panel hidden" id="p-inv"></div>
+    <div class="panel hidden" id="p-orders"></div>
     <div class="panel hidden" id="p-pullout"></div>
       <div class="panel hidden" id="p-summary"></div>
     <div class="panel hidden" id="p-racks"></div>
@@ -856,7 +858,7 @@ function seedSheets(){
 }
 function freshState(){
   return {racks:{}, brands:SEED_BRANDS.map(b=>({...b})), assign:{}, inv:{}, locks:{}, notes:{},
-    kinds:{}, labels:{}, catLines:[], dispatches:[]};
+    kinds:{}, labels:{}, catLines:[], dispatches:[], orders:[]};
 }
 
 /* Official brand colours always win over whatever an older save held.
@@ -7410,6 +7412,338 @@ async function renderUsers(){
 }
 
 /* ============================================================
+   Orders — what was ordered, and picking it off the map
+
+   An order summary comes in as a spreadsheet: PO number, SKU, quantity.
+   Each line is then picked from a slot, which deducts the stock, or marked
+   as unavailable here and sourced from the SII warehouse instead.
+   ============================================================ */
+const ORDER_FIELDS = {
+  po:    ['po','pono','ponumber','purchaseorder','order','orderno','ordernumber','ref',
+          'reference','so','sono','salesorder','docno','documentno','invoice','invoiceno'],
+  sku:   ['sku','skucode','itemcode','item','code','articlecode','model','modelno','product'],
+  qty:   ['qty','quantity','qtyordered','orderedqty','ordered','pcs','pieces','order'],
+  customer:['customer','client','account','buyer','shipto','store','branch','consignee'],
+  due:   ['due','duedate','deliverydate','datedue','ship','shipdate','deliveron']
+};
+const ORDER_LABEL = { po:'PO / order number', sku:'SKU', qty:'Qty ordered',
+  customer:'Customer', due:'Delivery date' };
+
+/** Where a line stands. Picked in full, partly, or deliberately not stocked. */
+const LINE_STATE = {
+  open:    { label:'to pick',        tone:'warn' },
+  part:    { label:'part picked',    tone:'warn' },
+  done:    { label:'picked',         tone:'ok'   },
+  nostock: { label:'no stock',       tone:'bad'  },
+  sii:     { label:'SII warehouse',  tone:''     }
+};
+
+function orderLineState(l){
+  if(l.flag==='nostock') return 'nostock';
+  if(l.flag==='sii') return 'sii';
+  const got=(l.picks||[]).reduce((a,p)=>a+p.qty,0);
+  if(got<=0) return 'open';
+  return got>=l.qty ? 'done' : 'part';
+}
+const pickedQty = l => (l.picks||[]).reduce((a,p)=>a+p.qty,0);
+
+/** Slots holding a SKU, fullest first — the picking list for one line. */
+function stockFor(sku){
+  const out=[];
+  Object.keys(S.inv||{}).forEach(loc=>{
+    (S.inv[loc]||[]).forEach(l=>{
+      if(l.sku===sku && (+l.qty||0)>0) out.push({loc,qty:+l.qty||0,packing:l.packing});
+    });
+  });
+  return out.sort((a,b)=>b.qty-a.qty);
+}
+
+function commitOrders(rows,{dryRun}){
+  const rejected=[], warnings=[];
+  const byPo=new Map();
+  rows.forEach(r=>{
+    const rowRef=r.__row||'';
+    const po=String(r.po??'').trim().toUpperCase();
+    const sku=String(r.sku??'').trim();
+    const qty=num(r.qty);
+    if(!po){ rejected.push({rowRef,key:sku,reasons:['no PO number']}); return; }
+    if(!sku){ rejected.push({rowRef,key:po,reasons:['no SKU']}); return; }
+    if(qty===null||qty<=0){ rejected.push({rowRef,key:sku,reasons:['no quantity']}); return; }
+    const notes=[];
+    if(!catInfo(sku)) notes.push('not in the catalog — it can still be ordered and picked');
+    if(!stockFor(sku).length) notes.push('nothing on the map for this SKU yet');
+    if(notes.length) warnings.push({rowRef,key:sku,notes});
+    if(!byPo.has(po)) byPo.set(po,{ref:po,customer:String(r.customer??'').trim(),
+      due:String(r.due??'').trim(),lines:[]});
+    const o=byPo.get(po);
+    if(!o.customer&&r.customer) o.customer=String(r.customer).trim();
+    const existing=o.lines.find(l=>l.sku.toUpperCase()===sku.toUpperCase());
+    // The same SKU twice on one PO is one line with the quantities added.
+    if(existing) existing.qty+=qty;
+    else o.lines.push({sku,qty,picks:[],flag:'',note:''});
+  });
+
+  let created=0, merged=0;
+  const plan=[...byPo.values()];
+  plan.forEach(o=>{ (S.orders||[]).some(x=>x.ref===o.ref) ? merged++ : created++; });
+
+  const summary={ rowsReceived:rows.length, accepted:rows.length-rejected.length,
+    orders:plan.length, created, merged, rejected:rejected.length, warnings:warnings.length };
+
+  if(!dryRun){
+    S.orders=S.orders||[];
+    plan.forEach(o=>{
+      const existing=S.orders.find(x=>x.ref===o.ref);
+      if(!existing){
+        S.orders.push({ ...o, at:new Date().toLocaleString(),
+          iso:new Date().toISOString(), by:ME?.name||ME?.username||'' });
+        return;
+      }
+      // Re-uploading a PO tops up quantities and adds new SKUs. Picks already
+      // made are never touched, so a part-picked order survives a re-import.
+      existing.customer=existing.customer||o.customer;
+      existing.due=existing.due||o.due;
+      o.lines.forEach(l=>{
+        const hit=existing.lines.find(x=>x.sku.toUpperCase()===l.sku.toUpperCase());
+        if(hit) hit.qty=l.qty;
+        else existing.lines.push(l);
+      });
+    });
+    commit();
+  }
+  return { summary, rejected, warnings, committed:!dryRun };
+}
+
+const orderImporter = makeImporter({
+  fields:ORDER_FIELDS, labels:ORDER_LABEL, required:['po','sku','qty'], wanted:['customer'],
+  ids: importerIds('o'),
+  ignoreNote:'This tool takes the PO number, SKU, quantity ordered, and optionally a customer '
+    +'and delivery date.',
+  commitLabel:'Save orders',
+  commit: commitOrders,
+  stats: s => [['Rows read',s.rowsReceived],['Orders',s.orders],['New',s.created],
+    ['Updated',s.merged],['Rejected',s.rejected]],
+  savedMessage: s => `Saved. ${s.created} new order${s.created===1?'':'s'}, ${s.merged} updated.`,
+  after: () => renderOrders()
+});
+
+let openOrderRef='';
+
+function renderOrders(){
+  const orders=(S.orders||[]).slice().reverse();
+  $('#p-orders').innerHTML=`
+  <h2>Orders</h2>
+  <p class="lead">Upload an order summary, then pick each line off the map. Picking deducts the
+  stock. Anything you cannot supply is marked no stock, or sent to the SII warehouse.</p>
+
+  <div class="card" style="padding-top:16px;padding-bottom:16px">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Upload an order summary</h3>
+      <span style="font-size:12.5px;color:var(--ink-2)">PO number, SKU and quantity.</span>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="o-toggle">${ordImportOpen?'Close':'Open'}</button>
+    </div>
+    <div id="o-importwrap" class="${ordImportOpen?'':'hidden'}" style="margin-top:16px">
+      <div class="card" style="margin-bottom:0">
+        ${importerMarkup('o',{ title:'Import orders',
+          lede:'Every sheet with a PO column is read. One row per SKU per order; the same SKU '
+            +'twice on a PO is added together. Re-uploading a PO updates its quantities and '
+            +'leaves anything already picked alone.',
+          commitLabel:'Save orders' })}
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Orders</h3>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="o-csv">Download CSV</button>
+    </div>
+    ${orders.length?`<div class="scroll cap" style="margin-top:12px"><table>
+      <thead><tr><th>PO</th><th>Customer</th><th>Added</th><th class="num">Lines</th>
+        <th class="num">Ordered</th><th class="num">Picked</th><th>Progress</th>${
+        isAdmin()?'<th></th>':''}</tr></thead>
+      <tbody>${orders.map(o=>{
+        const ord=o.lines.reduce((a,l)=>a+l.qty,0);
+        const got=o.lines.reduce((a,l)=>a+pickedQty(l),0);
+        const states=o.lines.map(orderLineState);
+        const settled=states.filter(x=>x==='done'||x==='nostock'||x==='sii').length;
+        const pct=o.lines.length?Math.round(settled/o.lines.length*100):0;
+        return `<tr>
+          <td class="mono"><button data-oopen="${esc(o.ref)}" style="appearance:none;background:none;
+            border:0;padding:0;font:inherit;color:var(--king-deep);cursor:pointer">${esc(o.ref)}</button></td>
+          <td>${esc(o.customer||'—')}</td>
+          <td class="mono" style="font-size:11.5px">${esc(o.at||'')}</td>
+          <td class="num">${o.lines.length}</td>
+          <td class="num">${ord.toLocaleString()}</td>
+          <td class="num">${got.toLocaleString()}</td>
+          <td><div style="display:flex;align-items:center;gap:8px">
+            <span style="flex:1;height:5px;background:var(--line);border-radius:99px;overflow:hidden;min-width:60px">
+              <span style="display:block;height:100%;width:${pct}%;background:${pct===100?'var(--jade)':'var(--king)'}"></span></span>
+            <span class="mono" style="font-size:11px">${pct}%</span></div></td>
+          ${isAdmin()?`<td style="text-align:right;white-space:nowrap">
+            <button class="btn quiet" data-odelete="${esc(o.ref)}" style="padding:2px 9px;color:var(--terra)">Delete</button>
+          </td>`:''}
+        </tr>`;}).join('')}</tbody></table></div>`
+      :'<p class="lead" style="margin:10px 0 0">No orders yet.</p>'}
+  </div>
+
+  <div id="o-detail"></div>`;
+
+  $('#o-toggle').onclick=()=>{
+    ordImportOpen=!ordImportOpen;
+    $('#o-importwrap').classList.toggle('hidden',!ordImportOpen);
+    $('#o-toggle').textContent=ordImportOpen?'Close':'Open';
+    if(ordImportOpen) orderImporter.wire();
+  };
+  if(ordImportOpen) orderImporter.wire();
+  $('#o-csv').onclick=downloadOrdersCsv;
+  $('#p-orders').querySelectorAll('[data-oopen]').forEach(b=>b.onclick=()=>{
+    openOrderRef = openOrderRef===b.dataset.oopen ? '' : b.dataset.oopen;
+    renderOrders();
+  });
+  $('#p-orders').querySelectorAll('[data-odelete]').forEach(b=>b.onclick=()=>deleteOrder(b.dataset.odelete));
+  if(openOrderRef) drawOrderDetail();
+}
+let ordImportOpen=false;
+
+function drawOrderDetail(){
+  const o=(S.orders||[]).find(x=>x.ref===openOrderRef);
+  const host=$('#o-detail');
+  if(!o){ host.innerHTML=''; return; }
+
+  host.innerHTML=`<div class="card" style="border-color:var(--king)">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">${esc(o.ref)}</h3>
+      <span style="font-size:13px;color:var(--ink-2)">${esc(o.customer||'no customer')}${
+        o.due?' · due '+esc(o.due):''}</span>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="od-close">Close</button>
+    </div>
+    <div class="scroll" style="margin-top:12px"><table>
+      <thead><tr><th>SKU</th><th class="num">Ordered</th><th class="num">Picked</th>
+        <th class="num">Left</th><th>Where it is</th><th>State</th><th></th></tr></thead>
+      <tbody>${o.lines.map((l,i)=>{
+        const got=pickedQty(l), left=Math.max(0,l.qty-got);
+        const st=orderLineState(l), meta=LINE_STATE[st];
+        const stock=stockFor(l.sku);
+        const total=stock.reduce((a,x)=>a+x.qty,0);
+        return `<tr>
+          <td class="mono">${esc(l.sku)}
+            ${(l.picks||[]).length?`<div style="font-size:11px;color:var(--ink-3)">from ${
+              l.picks.map(p=>`${p.loc} (${p.qty})`).join(', ')}</div>`:''}
+            ${l.note?`<div style="font-size:11px;color:var(--brass)">${esc(l.note)}</div>`:''}</td>
+          <td class="num">${l.qty.toLocaleString()}</td>
+          <td class="num">${got.toLocaleString()}</td>
+          <td class="num" style="${left&&st!=='nostock'&&st!=='sii'?'font-weight:600':''}">${left.toLocaleString()}</td>
+          <td style="font-size:12px">${stock.length
+            ? stock.slice(0,3).map(x=>`<span class="mono">${x.loc}</span> ${x.qty.toLocaleString()}`).join('<br>')
+              + (stock.length>3?`<div style="color:var(--ink-3)">+${stock.length-3} more</div>`:'')
+              + (total<left?`<div style="color:var(--terra)">short by ${(left-total).toLocaleString()}</div>`:'')
+            : '<span style="color:var(--terra)">nothing on the map</span>'}</td>
+          <td><span class="pill ${meta.tone}">${meta.label}</span></td>
+          <td style="text-align:right;white-space:nowrap">
+            ${left>0&&st!=='nostock'&&st!=='sii'&&stock.length
+              ? `<button class="btn ghost" data-opick="${i}" style="padding:2px 9px">Pick</button>`:''}
+            ${st==='nostock'||st==='sii'
+              ? `<button class="btn quiet" data-oclear="${i}" style="padding:2px 9px">Undo</button>`
+              : `<button class="btn quiet" data-oflag="${i}|nostock" style="padding:2px 8px">No stock</button>
+                 <button class="btn quiet" data-oflag="${i}|sii" style="padding:2px 8px">SII</button>`}
+            ${got>0?`<button class="btn quiet" data-ounpick="${i}" style="padding:2px 8px;color:var(--terra)">Return</button>`:''}
+          </td></tr>`;}).join('')}</tbody></table></div>
+    <div id="od-pick"></div>
+  </div>`;
+
+  $('#od-close').onclick=()=>{ openOrderRef=''; renderOrders(); };
+  host.querySelectorAll('[data-opick]').forEach(b=>b.onclick=()=>openPickForm(+b.dataset.opick));
+  host.querySelectorAll('[data-oflag]').forEach(b=>b.onclick=()=>{
+    const [i,flag]=b.dataset.oflag.split('|');
+    o.lines[+i].flag=flag;
+    o.lines[+i].note = flag==='sii' ? 'To be supplied from the SII warehouse' : 'Not available here';
+    commit(); renderOrders();
+  });
+  host.querySelectorAll('[data-oclear]').forEach(b=>b.onclick=()=>{
+    o.lines[+b.dataset.oclear].flag=''; o.lines[+b.dataset.oclear].note='';
+    commit(); renderOrders();
+  });
+  host.querySelectorAll('[data-ounpick]').forEach(b=>b.onclick=()=>{
+    const l=o.lines[+b.dataset.ounpick];
+    if(!confirm(`Return everything picked for ${l.sku} to its slots?`)) return;
+    (l.picks||[]).forEach(p=>{ returnStock(p.loc,l.sku,p.qty,null); tidySlot(p.loc); });
+    l.picks=[];
+    commit(); renderOrders();
+  });
+  host.scrollIntoView?.({block:'nearest'});
+}
+
+/** Pick a line: choose the slot and how much, then deduct it. */
+function openPickForm(i){
+  const o=(S.orders||[]).find(x=>x.ref===openOrderRef);
+  const l=o.lines[i];
+  const left=Math.max(0,l.qty-pickedQty(l));
+  const stock=stockFor(l.sku);
+  const host=$('#od-pick');
+  host.innerHTML=`<div style="background:var(--porcelain);border:1px solid var(--king);
+    border-radius:10px;padding:14px 16px;margin-top:14px">
+    <h3 style="margin-bottom:10px">Pick ${esc(l.sku)} — ${left.toLocaleString()} still needed</h3>
+    <div class="row" style="margin-top:0">
+      <div style="min-width:230px"><label>Take from</label>
+        <select id="pk-loc" style="width:100%">${stock.map(x=>
+          `<option value="${esc(x.loc)}">${esc(x.loc)} — ${x.qty.toLocaleString()} pcs</option>`).join('')}</select></div>
+      <div style="min-width:120px"><label>Pieces</label>
+        <input type="number" id="pk-qty" min="1" step="1" value="${Math.min(left,stock[0]?stock[0].qty:left)}" style="width:100%"></div>
+      <button class="btn" id="pk-go">Pick and deduct</button>
+      <button class="btn quiet" id="pk-cancel">Cancel</button>
+    </div>
+    <div id="pk-err" class="note bad hidden"></div>
+  </div>`;
+
+  $('#pk-cancel').onclick=()=>{ host.innerHTML=''; };
+  $('#pk-go').onclick=()=>{
+    const loc=$('#pk-loc').value;
+    const qty=Math.max(0,Math.round(Number($('#pk-qty').value)||0));
+    const err=$('#pk-err');
+    const have=(S.inv[loc]||[]).filter(x=>x.sku===l.sku).reduce((a,x)=>a+(+x.qty||0),0);
+    if(!qty){ err.textContent='Enter how many pieces.'; err.classList.remove('hidden'); return; }
+    if(qty>left){ err.textContent=`Only ${left.toLocaleString()} left on this line.`; err.classList.remove('hidden'); return; }
+    if(qty>have){ err.textContent=`${loc} only holds ${have.toLocaleString()} pcs.`; err.classList.remove('hidden'); return; }
+    takeStock(loc,l.sku,qty,null);
+    tidySlot(loc);
+    l.picks=[...(l.picks||[]),{loc,qty,at:new Date().toLocaleString(),by:ME?.name||ME?.username||''}];
+    commit(); renderOrders();
+    toast(`${qty.toLocaleString()} × ${l.sku} picked from ${loc}`);
+  };
+}
+
+function deleteOrder(ref){
+  if(!isAdmin()) return;
+  const o=(S.orders||[]).find(x=>x.ref===ref);
+  if(!o) return;
+  const got=o.lines.reduce((a,l)=>a+pickedQty(l),0);
+  if(!confirm(`Delete ${ref}?${got?`\n\n${got.toLocaleString()} pieces already picked go back into their slots.`:''}`)) return;
+  o.lines.forEach(l=>(l.picks||[]).forEach(p=>{ returnStock(p.loc,l.sku,p.qty,null); tidySlot(p.loc); }));
+  S.orders=S.orders.filter(x=>x!==o);
+  if(openOrderRef===ref) openOrderRef='';
+  commit(); renderOrders();
+  toast(`${ref} deleted${got?', stock returned':''}`);
+}
+
+function downloadOrdersCsv(){
+  const rows=[['PO','Customer','Added','SKU','Ordered','Picked','Left','State','Picked from','Note']];
+  (S.orders||[]).forEach(o=>o.lines.forEach(l=>{
+    const got=pickedQty(l);
+    rows.push([o.ref,o.customer||'',o.at||'',l.sku,l.qty,got,Math.max(0,l.qty-got),
+      LINE_STATE[orderLineState(l)].label,
+      (l.picks||[]).map(p=>`${p.loc}:${p.qty}`).join(' '),l.note||'']);
+  }));
+  if(rows.length===1) return toast('No orders yet');
+  const csv=rows.map(r=>r.map(v=>/[",\n]/.test(String(v))?`"${String(v).replace(/"/g,'""')}"`:v).join(',')).join('\n');
+  download('orders.csv',csv,'text/csv');
+  toast('Orders CSV downloaded');
+}
+
+/* ============================================================
    Pullout — stock leaving the warehouse
    ============================================================ */
 let poLines=[], poRack='', poLoc='', poUnit='box';
@@ -8318,6 +8652,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   $('#canvas').classList.toggle('hidden',t!=='map');
   $('#p-catalog').classList.toggle('hidden',t!=='catalog');
   $('#p-inv').classList.toggle('hidden',t!=='inv');
+  $('#p-orders').classList.toggle('hidden',t!=='orders');
   $('#p-pullout').classList.toggle('hidden',t!=='pullout');
   $('#p-scan').classList.toggle('hidden',t!=='scan');
   $('#p-summary').classList.toggle('hidden',t!=='summary');
@@ -8327,6 +8662,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   if(t!=='scan'&&camStream){ camStream.getTracks().forEach(x=>x.stop()); camStream=null; }
   if(t==='catalog') renderCatalog();
   if(t==='inv') renderInv();
+  if(t==='orders') renderOrders();
   if(t==='pullout') renderPullout();
   if(t==='scan') renderScan();
   if(t==='summary') renderSummary();
@@ -8336,8 +8672,8 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
 
 async function boot(){
   const saved=await loadSaved();
-  if(saved&&saved.racks) S={inv:{},locks:{},notes:{},kinds:{},labels:{},catLines:[],dispatches:[],...saved};
-  S.kinds=S.kinds||{}; S.labels=S.labels||{}; S.catLines=S.catLines||[]; S.dispatches=S.dispatches||[];
+  if(saved&&saved.racks) S={inv:{},locks:{},notes:{},kinds:{},labels:{},catLines:[],dispatches:[],orders:[],...saved};
+  S.kinds=S.kinds||{}; S.labels=S.labels||{}; S.catLines=S.catLines||[]; S.dispatches=S.dispatches||[]; S.orders=S.orders||[];
   applyOfficialColors();
   // Only an administrator may seed the rack sheets; a scanner's copy would be
   // reverted by the server anyway, so it is not attempted.
