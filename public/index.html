@@ -45,9 +45,8 @@ button{cursor:pointer}
 .brandbar{padding:18px 18px 14px;border-bottom:1px solid rgba(255,255,255,.28)}
 .brandrow{display:flex;align-items:center;gap:10px}
 .brandlogo{height:34px;width:auto;max-width:150px;object-fit:contain;display:block}
-.brandtile{width:34px;height:34px;flex:0 0 34px;border-radius:8px;background:rgba(255,255,255,.18);
-  border:1px solid rgba(255,255,255,.35);align-items:center;justify-content:center;
-  font:600 12px var(--sans);letter-spacing:.04em;color:#fff}
+.brandtile{width:34px;height:34px;flex:0 0 34px;border-radius:9px;background:rgba(255,255,255,.16);
+  border:1px solid rgba(255,255,255,.32);align-items:center;justify-content:center;color:#fff}
 .brandwords{display:flex;flex-direction:column;line-height:1.2;min-width:0}
 .brandwords strong{font-size:13.5px;font-weight:600;letter-spacing:-.01em;color:#fff;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -114,6 +113,8 @@ button{cursor:pointer}
 .gate-mark{width:56px;height:56px;margin:0 auto 18px;border-radius:14px;display:flex;
   align-items:center;justify-content:center;font:600 19px var(--sans);color:#fff;letter-spacing:.04em;
   background:linear-gradient(160deg,#ff9a5a,#dd3f2c)}
+.gate-name{font-size:12px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--king-deep);margin:-8px 0 10px}
 .gate h1{font-size:29px;letter-spacing:-.025em;margin-bottom:6px}
 .gate-sub{color:var(--ink-2);font-size:14px;margin:0 0 26px}
 .gate-card{background:var(--card);border:1px solid var(--line);border-radius:12px;
@@ -310,7 +311,18 @@ tbody tr:hover td{background:#faf7f4}
 <div id="gate" class="gate">
   <img class="gate-logo" src="logo-red.png" alt=""
     onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-  <div class="gate-mark">SII</div>
+  <div class="gate-mark">
+    <svg viewBox="0 0 32 32" width="30" height="30" fill="none">
+      <circle cx="16" cy="16" r="6.5" fill="#fff"/>
+      <g stroke="#fff" stroke-width="2.4" stroke-linecap="round">
+        <path d="M16 2.5v4"/><path d="M16 25.5v4"/>
+        <path d="M2.5 16h4"/><path d="M25.5 16h4"/>
+        <path d="M6.4 6.4l2.8 2.8"/><path d="M22.8 22.8l2.8 2.8"/>
+        <path d="M25.6 6.4l-2.8 2.8"/><path d="M9.2 22.8l-2.8 2.8"/>
+      </g>
+    </svg>
+  </div>
+  <div class="gate-name">Sunbeams Impex Inc.</div>
   <h1 id="gateTitle">Warehouse</h1>
   <p class="gate-sub" id="gateLede">Rack map and inventory</p>
   <div class="gate-card">
@@ -344,7 +356,17 @@ tbody tr:hover td{background:#faf7f4}
              broken image. -->
         <img class="brandlogo" src="logo.png" alt=""
           onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-        <span class="brandtile" style="display:none">SII</span>
+        <span class="brandtile" style="display:none" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="22" height="22" fill="none">
+            <circle cx="16" cy="16" r="6.5" fill="#fff"/>
+            <g stroke="#fff" stroke-width="2.4" stroke-linecap="round">
+              <path d="M16 2.5v4"/><path d="M16 25.5v4"/>
+              <path d="M2.5 16h4"/><path d="M25.5 16h4"/>
+              <path d="M6.4 6.4l2.8 2.8"/><path d="M22.8 22.8l2.8 2.8"/>
+              <path d="M25.6 6.4l-2.8 2.8"/><path d="M9.2 22.8l-2.8 2.8"/>
+            </g>
+          </svg>
+        </span>
         <div class="brandwords">
           <strong>Sunbeams Impex Inc.</strong>
           <span>Warehouse</span>
@@ -388,6 +410,8 @@ tbody tr:hover td{background:#faf7f4}
         <button class="railbtn" id="loadsheets">Reload all rack sheets</button>
         <button class="railbtn" id="loadold">Load old-warehouse racks A–Y</button>
         <button class="railbtn" id="locktoggle">Lock every rack</button>
+        <p class="mini">Racks lock themselves each time you sign in. Unlock a single one from its
+        header, or all of them here.</p>
         <button class="railbtn warn" id="reset">Clear all assignments</button>
       </div>
     </div>
@@ -8320,8 +8344,13 @@ async function boot(){
   const added = isAdmin() ? seedSheets() : [];
   if(added.length) save();
   active=S.brands[0]?.name||null;
+  // Every rack starts locked at each sign-in. Editing the map is rare and
+  // destructive; unlocking is one click, and an accidental drag across a rack
+  // is not. Deliberately not saved, so this is a fresh state each session
+  // rather than something that has to be undone in storage.
   const rks=Object.keys(S.racks);
-  if(rks.length&&rks.every(isLocked)) $('#locktoggle').textContent='Unlock every rack';
+  rks.forEach(r=>{ S.locks[r]=true; });
+  if(rks.length) $('#locktoggle').textContent='Unlock every rack';
   $('#qtytoggle').checked=showQty;
   syncTool(); renderRail(); renderMap();
 }
