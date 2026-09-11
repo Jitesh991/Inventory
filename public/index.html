@@ -400,6 +400,7 @@ tbody tr:hover td{background:#faf7f4}
         <button data-tab="catalog">Catalog</button>
         <button data-tab="scan">Scan</button>
         <button data-tab="inv">Inventory</button>
+        <button data-tab="pullout">Pullout</button>
         <button data-tab="summary">Dashboard</button>
         <button data-tab="racks">Rack setup</button>
         <button data-tab="users">Users</button>
@@ -418,6 +419,7 @@ tbody tr:hover td{background:#faf7f4}
     <div class="panel hidden" id="p-catalog"></div>
     <div class="panel hidden" id="p-scan"></div>
       <div class="panel hidden" id="p-inv"></div>
+    <div class="panel hidden" id="p-pullout"></div>
       <div class="panel hidden" id="p-summary"></div>
     <div class="panel hidden" id="p-racks"></div>
     <div class="panel hidden" id="p-users"></div>
@@ -829,7 +831,8 @@ function seedSheets(){
   return added;
 }
 function freshState(){
-  return {racks:{}, brands:SEED_BRANDS.map(b=>({...b})), assign:{}, inv:{}, locks:{}, notes:{}, kinds:{}, labels:{}, catLines:[]};
+  return {racks:{}, brands:SEED_BRANDS.map(b=>({...b})), assign:{}, inv:{}, locks:{}, notes:{},
+    kinds:{}, labels:{}, catLines:[], dispatches:[]};
 }
 
 /* Official brand colours always win over whatever an older save held.
@@ -7383,6 +7386,282 @@ async function renderUsers(){
 }
 
 /* ============================================================
+   Pullout — stock leaving the warehouse
+   ============================================================ */
+let poLines=[], poRack='', poLoc='', poUnit='box';
+
+function poFindStock(sku){
+  // Where this SKU is, most stocked first, so the obvious slot is offered.
+  const out=[];
+  Object.keys(S.inv||{}).forEach(loc=>{
+    S.inv[loc].forEach(l=>{ if(l.sku===sku) out.push({loc,qty:+l.qty||0,packing:l.packing}); });
+  });
+  return out.sort((a,b)=>b.qty-a.qty);
+}
+
+function renderPullout(){
+  const racks=Object.keys(S.racks).sort(sortRacks);
+  if(poRack && !S.racks[poRack]) poRack='';
+  if(!poRack && racks.length) poRack=racks[0];
+  const totalPcs=poLines.reduce((a,l)=>a+l.qty,0);
+  const history=(S.dispatches||[]).slice().reverse();
+
+  $('#p-pullout').innerHTML=`
+  <h2>Pullout</h2>
+  <p class="lead">Stock leaving the warehouse. Scan each SKU, add the truck and driver, then release.
+  The quantities come off the map and the whole pullout is posted to Lark.</p>
+
+  <div class="card">
+    <div class="scanbar">
+      <div class="fld"><label>Rack</label>
+        <select id="po-rack">${racks.map(r=>`<option value="${esc(r)}" ${r===poRack?'selected':''}>${
+          esc(isFloor(r)?rackName(r):'Rack '+r)}</option>`).join('')}</select></div>
+      <div class="fld"><label>Slot</label><select id="po-slot"></select></div>
+      <div class="fld"><label>Counting</label>
+        <select id="po-unit">
+          <option value="box" ${poUnit==='box'?'selected':''}>Boxes</option>
+          <option value="piece" ${poUnit==='piece'?'selected':''}>Pieces</option>
+        </select></div>
+      <div class="fld"><label id="po-countlabel">${poUnit==='box'?'Boxes':'Pieces'}</label>
+        <input type="number" id="po-count" value="1" min="0" step="1"></div>
+      <div class="fld"><label>Scan barcode or type a SKU</label>
+        <input type="text" id="po-code" placeholder="waiting for scan…" autocomplete="off"></div>
+    </div>
+    <div id="po-hit"></div>
+  </div>
+
+  <div class="card" style="${poLines.length?'border-color:var(--king)':''}">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">On this truck</h3>
+      <span class="pill ${poLines.length?'warn':'ok'}">${poLines.length
+        ? `${poLines.length} line${poLines.length===1?'':'s'} · ${totalPcs.toLocaleString()} pcs` : 'nothing added'}</span>
+    </div>
+    ${poLines.length?`<div class="scroll" style="margin-top:12px"><table>
+      <thead><tr><th>Slot</th><th>SKU</th><th class="num">Taking</th><th class="num">In slot</th>
+        <th class="num">After</th><th></th></tr></thead>
+      <tbody>${poLines.map((l,i)=>{
+        const have=(S.inv[l.loc]||[]).filter(x=>x.sku===l.sku).reduce((a,x)=>a+(+x.qty||0),0);
+        const after=have-l.qty;
+        return `<tr>
+          <td class="mono">${esc(l.loc)}</td>
+          <td class="mono">${esc(l.sku)}</td>
+          <td class="num">${l.qty.toLocaleString()}${l.boxes?` <span style="color:var(--ink-3)">(${l.boxes} bx)</span>`:''}</td>
+          <td class="num">${have.toLocaleString()}</td>
+          <td class="num" style="${after<0?'color:var(--terra);font-weight:600':''}">${after.toLocaleString()}</td>
+          <td style="text-align:right"><button class="btn quiet" data-podel="${i}" style="padding:2px 8px">Remove</button></td>
+        </tr>`;}).join('')}</tbody></table></div>
+
+      <div style="background:var(--porcelain);border:1px solid var(--line-2);border-radius:10px;
+        padding:14px 16px;margin-top:14px">
+        <h3 style="margin-bottom:10px">Truck and driver</h3>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+          <div><label>Truck / plate</label><input type="text" id="po-truck" value="${esc(poMeta.truck||'')}" style="width:100%;text-transform:uppercase"></div>
+          <div><label>Driver</label><input type="text" id="po-driver" value="${esc(poMeta.driver||'')}" style="width:100%"></div>
+          <div><label>Contact</label><input type="text" id="po-contact" value="${esc(poMeta.contact||'')}" style="width:100%"></div>
+          <div><label>Destination</label><input type="text" id="po-dest" value="${esc(poMeta.destination||'')}" style="width:100%"></div>
+          <div><label>Date and time out</label><input type="datetime-local" id="po-at" value="${esc(poMeta.at||nowLocal())}" style="width:100%"></div>
+        </div>
+        <div style="margin-top:12px"><label>Note</label>
+          <input type="text" id="po-note" value="${esc(poMeta.note||'')}" placeholder="anything worth recording" style="width:100%"></div>
+        <div id="po-err" class="note bad hidden"></div>
+        <div class="row">
+          <button class="btn" id="po-release">Release and send to Lark</button>
+          <button class="btn quiet" id="po-clear">Discard</button>
+        </div>
+        <div id="po-log" class="log hidden"></div>
+      </div>`
+      : '<p class="lead" style="margin:10px 0 0">Scanned lines collect here. Nothing leaves the map until you release.</p>'}
+  </div>
+
+  <div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Pullouts recorded</h3>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="po-csv">Download CSV</button>
+    </div>
+    ${history.length?`<div class="scroll cap" style="margin-top:12px"><table>
+      <thead><tr><th>Reference</th><th>Out</th><th>Truck</th><th>Driver</th><th>Destination</th>
+        <th class="num">SKUs</th><th class="num">Pieces</th><th>Lark</th></tr></thead>
+      <tbody>${history.map(d=>`<tr>
+        <td class="mono">${esc(d.ref)}</td>
+        <td class="mono" style="font-size:11.5px">${esc(d.at)}</td>
+        <td class="mono">${esc(d.truck||'—')}</td>
+        <td>${esc(d.driver||'—')}</td>
+        <td>${esc(d.destination||'—')}</td>
+        <td class="num">${d.lines.length}</td>
+        <td class="num">${d.lines.reduce((a,l)=>a+l.qty,0).toLocaleString()}</td>
+        <td><span class="pill ${d.lark>0?'ok':'warn'}">${d.lark>0?`sent ×${d.lark}`:'not sent'}</span></td>
+      </tr>`).join('')}</tbody></table></div>`
+      :'<p class="lead" style="margin:10px 0 0">No pullouts yet.</p>'}
+  </div>`;
+
+  poDrawSlots();
+  const code=$('#po-code');
+  $('#po-rack').onchange=e=>{ poRack=e.target.value; poLoc=''; poDrawSlots(); code.focus(); };
+  $('#po-slot').onchange=e=>{ poLoc=e.target.value; code.focus(); };
+  $('#po-unit').onchange=e=>{ poUnit=e.target.value==='piece'?'piece':'box';
+    $('#po-countlabel').textContent=poUnit==='box'?'Boxes':'Pieces'; code.focus(); };
+  code.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); poScan(code.value); code.value=''; } };
+  $('#po-count').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); code.focus(); } };
+  $('#p-pullout').querySelectorAll('[data-podel]').forEach(b=>b.onclick=()=>{
+    poLines.splice(+b.dataset.podel,1); renderPullout(); });
+  ['truck','driver','contact','dest','at','note'].forEach(f=>{
+    const el=$('#po-'+f); if(!el) return;
+    el.oninput=()=>{ poMeta[f==='dest'?'destination':f]=el.value; };
+  });
+  $('#po-release')&&($('#po-release').onclick=releasePullout);
+  $('#po-clear')&&($('#po-clear').onclick=()=>{
+    if(!confirm('Discard this truck load?')) return;
+    poLines=[]; poMeta={}; renderPullout(); });
+  $('#po-csv').onclick=downloadDispatchCsv;
+  code.focus();
+}
+let poMeta={};
+const nowLocal=()=>{ const d=new Date(); d.setMinutes(d.getMinutes()-d.getTimezoneOffset());
+  return d.toISOString().slice(0,16); };
+
+function poDrawSlots(){
+  const sel=$('#po-slot'); if(!sel) return;
+  const out=[];
+  if(poRack&&S.racks[poRack]){
+    Object.keys(S.racks[poRack]).map(Number).sort((a,b)=>a-b).forEach(bay=>{
+      S.racks[poRack][bay].slice().sort((a,b)=>a-b).forEach(l=>{
+        const loc=`${poRack}${bay}.${l}`;
+        const pcs=qtyOf(loc);
+        out.push(`<option value="${esc(loc)}" ${loc===poLoc?'selected':''}>${esc(loc)}${
+          pcs?` — ${pcs.toLocaleString()} pcs`:' — empty'}</option>`);
+      });
+    });
+  }
+  sel.innerHTML=out.length?out.join(''):'<option value="">no slots</option>';
+  if(!poLoc||!out.some(o=>o.includes(`value="${poLoc}"`))) poLoc=sel.value||'';
+}
+
+function poShow(html,cls){ $('#po-hit').innerHTML=`<div class="hit-card ${cls||''}">${html}</div>`; }
+
+function poScan(raw){
+  const loc=(poLoc||'').toUpperCase();
+  if(!/^[A-Z]{1,3}\d+\.\d+$/.test(loc)){ poShow('<div class="hit-sku">No slot chosen</div>','miss'); return; }
+  const rec=lookup(raw);
+  if(!rec){ poShow(`<div class="hit-sku">${esc(String(raw).trim())}</div>
+    <div class="hit-meta">Not in the catalogue</div>`,'miss'); return; }
+
+  const count=Math.max(0,parseFloat($('#po-count').value)||0);
+  if(!count){ poShow('<div class="hit-sku">Count is zero</div>','miss'); return; }
+  const packing=rec.packing;
+  if(poUnit==='box'&&packing==null){
+    poShow(`<div class="hit-sku">${esc(rec.sku)}</div><div class="hit-meta">no pack size on file</div>
+      <div class="hit-note">Switch Counting to Pieces, or set the packing on the Catalog tab.</div>`,'miss');
+    return;
+  }
+  const qty=poUnit==='box'?count*packing:count;
+  const boxes=poUnit==='box'?count:null;
+
+  const have=(S.inv[loc]||[]).filter(x=>x.sku===rec.sku).reduce((a,x)=>a+(+x.qty||0),0);
+  const already=poLines.filter(l=>l.loc===loc&&l.sku===rec.sku).reduce((a,l)=>a+l.qty,0);
+  const after=have-already-qty;
+
+  poLines.push({loc,sku:rec.sku,brand:rec.brand,qty,boxes,packing});
+
+  // Where else this SKU sits, so a picker taking from the wrong slot notices.
+  const elsewhere=poFindStock(rec.sku).filter(x=>x.loc!==loc);
+  let note='';
+  if(after<0) note+=`<div class="hit-note">This slot only shows ${have.toLocaleString()} pcs.
+    Recorded anyway — the slot will go to ${after.toLocaleString()} and needs a recount.</div>`;
+  if(!have&&elsewhere.length) note+=`<div class="hit-note">Nothing recorded at ${loc} for this SKU.
+    It is at ${elsewhere.slice(0,3).map(x=>`${x.loc} (${x.qty})`).join(', ')}.</div>`;
+
+  renderPullout();
+  poShow(`<div class="hit-sku">${esc(rec.sku)}</div>
+    <div class="hit-meta"><span>${esc(rec.brand||'no brand')}</span><span>${loc}</span>
+    <span class="big">${poUnit==='box'?`${count} × ${packing} = ${qty.toLocaleString()} pcs`
+      :`${qty.toLocaleString()} pcs`}</span></div>${note}`, note?'warn':'');
+}
+
+function releasePullout(){
+  const err=$('#po-err');
+  const fail=t=>{ err.textContent=t; err.classList.remove('hidden'); };
+  err.classList.add('hidden');
+  if(!poLines.length) return fail('Nothing on the truck yet.');
+  if(!($('#po-truck').value||'').trim()) return fail('Enter the truck or plate number.');
+  if(!($('#po-driver').value||'').trim()) return fail('Enter the driver.');
+
+  const at=$('#po-at').value ? new Date($('#po-at').value) : new Date();
+  const ref='PO-'+at.getFullYear()+String(at.getMonth()+1).padStart(2,'0')
+    +String(at.getDate()).padStart(2,'0')+'-'+String((S.dispatches||[]).length+1).padStart(3,'0');
+
+  // Take the stock off the map. Going negative is allowed for now and flagged
+  // on the record, rather than blocking a truck that is already loaded.
+  const lines=poLines.map(l=>{
+    const arr=S.inv[l.loc]||[];
+    let left=l.qty, short=false;
+    arr.filter(x=>x.sku===l.sku).forEach(x=>{
+      const take=Math.min(+x.qty||0,left);
+      x.qty=(+x.qty||0)-take;
+      if(x.packing&&x.boxes!=null) x.boxes=+(x.qty/x.packing).toFixed(2);
+      left-=take;
+    });
+    if(left>0){
+      short=true;
+      // Record the overdraw against the slot so the shortfall is visible there
+      // too, not only in the Lark message.
+      const first=arr.find(x=>x.sku===l.sku);
+      if(first) first.qty=(+first.qty||0)-left;
+      else arr.push({sku:l.sku,boxes:null,packing:l.packing,qty:-left});
+      S.inv[l.loc]=arr;
+    }
+    S.inv[l.loc]=(S.inv[l.loc]||[]).filter(x=>(+x.qty||0)!==0);
+    if(S.inv[l.loc] && !S.inv[l.loc].length) delete S.inv[l.loc];
+    return {...l, short};
+  });
+
+  const record={ ref, at:at.toLocaleString(), iso:at.toISOString(),
+    truck:($('#po-truck').value||'').trim().toUpperCase(),
+    driver:($('#po-driver').value||'').trim(),
+    contact:($('#po-contact').value||'').trim(),
+    destination:($('#po-dest').value||'').trim(),
+    note:($('#po-note').value||'').trim(),
+    by: ME?.name||ME?.username||'', lines, lark:0 };
+
+  S.dispatches=[...(S.dispatches||[]), record];
+  poLines=[]; poMeta={};
+  commit();
+  renderPullout();
+
+  const log=$('#po-log');
+  if(log){ log.classList.remove('hidden'); log.textContent=`${record.ref} released. Sending to Lark…`; }
+
+  api('/api/lark',{method:'POST',body:JSON.stringify(record)})
+    .then(out=>{
+      const rec=(S.dispatches||[]).find(d=>d.ref===record.ref);
+      if(rec){ rec.lark=out.sent||0; commit(); }
+      renderPullout();
+      const l=$('#po-log');
+      if(l){ l.classList.remove('hidden');
+        l.textContent=`${record.ref} released. `+(out.sent
+          ? `Sent to ${out.sent} Lark bot${out.sent===1?'':'s'}.`
+          : 'Not sent to Lark — '+((out.results||[]).map(r=>r.error).filter(Boolean).join('; ')||'no webhook configured')
+            +'\nThe pullout is saved either way.'); }
+    })
+    .catch(e=>{
+      const l=$('#po-log');
+      if(l){ l.classList.remove('hidden');
+        l.textContent=`${record.ref} released and saved, but Lark failed: ${e.message}`; }
+    });
+}
+
+function downloadDispatchCsv(){
+  const rows=[['Reference','Date out','Truck','Driver','Contact','Destination','Released by',
+    'Slot','SKU','Brand','Boxes','Pieces','Short','Note']];
+  (S.dispatches||[]).forEach(d=>d.lines.forEach(l=>rows.push([d.ref,d.at,d.truck,d.driver,
+    d.contact,d.destination,d.by,l.loc,l.sku,l.brand||'',l.boxes??'',l.qty,l.short?'YES':'',d.note])));
+  if(rows.length===1) return toast('No pullouts recorded yet');
+  const csv=rows.map(r=>r.map(v=>/[",\n]/.test(String(v))?`"${String(v).replace(/"/g,'""')}"`:v).join(',')).join('\n');
+  download('pullouts.csv',csv,'text/csv');
+  toast('Pullout CSV downloaded');
+}
+
+/* ============================================================
    Inventory
    ============================================================ */
 function renderInv(){
@@ -7814,6 +8093,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   $('#canvas').classList.toggle('hidden',t!=='map');
   $('#p-catalog').classList.toggle('hidden',t!=='catalog');
   $('#p-inv').classList.toggle('hidden',t!=='inv');
+  $('#p-pullout').classList.toggle('hidden',t!=='pullout');
   $('#p-scan').classList.toggle('hidden',t!=='scan');
   $('#p-summary').classList.toggle('hidden',t!=='summary');
   $('#p-racks').classList.toggle('hidden',t!=='racks');
@@ -7822,6 +8102,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   if(t!=='scan'&&camStream){ camStream.getTracks().forEach(x=>x.stop()); camStream=null; }
   if(t==='catalog') renderCatalog();
   if(t==='inv') renderInv();
+  if(t==='pullout') renderPullout();
   if(t==='scan') renderScan();
   if(t==='summary') renderSummary();
   if(t==='racks') renderRacks();
@@ -7830,8 +8111,8 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
 
 async function boot(){
   const saved=await loadSaved();
-  if(saved&&saved.racks) S={inv:{},locks:{},notes:{},kinds:{},labels:{},catLines:[],...saved};
-  S.kinds=S.kinds||{}; S.labels=S.labels||{}; S.catLines=S.catLines||[];
+  if(saved&&saved.racks) S={inv:{},locks:{},notes:{},kinds:{},labels:{},catLines:[],dispatches:[],...saved};
+  S.kinds=S.kinds||{}; S.labels=S.labels||{}; S.catLines=S.catLines||[]; S.dispatches=S.dispatches||[];
   applyOfficialColors();
   // Only an administrator may seed the rack sheets; a scanner's copy would be
   // reverted by the server anyway, so it is not attempted.
