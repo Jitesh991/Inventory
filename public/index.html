@@ -7474,7 +7474,7 @@ function commitOrders(rows,{dryRun}){
     if(!stockFor(sku).length) notes.push('nothing on the map for this SKU yet');
     if(notes.length) warnings.push({rowRef,key:sku,notes});
     if(!byPo.has(po)) byPo.set(po,{ref:po,customer:String(r.customer??'').trim(),
-      due:String(r.due??'').trim(),lines:[]});
+      branch:String(r.branch??'').trim(), due:String(r.due??'').trim(),lines:[]});
     const o=byPo.get(po);
     if(!o.customer&&r.customer) o.customer=String(r.customer).trim();
     const existing=o.lines.find(l=>l.sku.toUpperCase()===sku.toUpperCase());
@@ -7514,6 +7514,88 @@ function commitOrders(rows,{dryRun}){
   return { summary, rejected, warnings, committed:!dryRun };
 }
 
+/**
+ * The SII order summary layout.
+ *
+ * Not one PO per row: the branches are columns. The header row carries the
+ * branch names, the row beneath it carries that branch's PO number, and each
+ * item row holds the quantity for each branch. One file therefore becomes one
+ * order per branch, which is how they are picked and delivered.
+ *
+ * Returns null when a sheet is not this shape, so the ordinary column mapper
+ * can handle a simple PO/SKU/Qty file instead.
+ */
+function readBranchSummary(rows){
+  const norm = v => String(v ?? '').replace(/\s+/g,' ').trim().toUpperCase();
+
+  // The header is the row naming the item column.
+  let h=-1;
+  for(let i=0;i<Math.min(20,rows.length);i++){
+    if((rows[i]||[]).some(c=>['ITEM CODE','SKU','ITEM'].includes(norm(c)))){ h=i; break; }
+  }
+  if(h<0) return null;
+  const head=rows[h].map(norm);
+  const skuCol=head.findIndex(c=>['ITEM CODE','SKU','ITEM'].includes(c));
+  const totalCol=head.findIndex(c=>c.startsWith('TOTAL QTY'));
+  const packCol=head.findIndex(c=>c==='PACKING');
+  if(skuCol<0||totalCol<0) return null;
+
+  /* Which columns are branches.
+     The row under the header carries a PO number for each branch and nothing
+     for the costing columns, so that row identifies them exactly. Guessing
+     from header names instead is what let SRP and cost be read as branches. */
+  const poRow=rows[h+1]||[];
+  const MONEY=/^(RATE|COST|SII COST|SRP|SII SRP|OLD-?SRP|L-?\d+%|DISCOUNT|PRICE|AMOUNT|UNIT)/;
+  const candidates=[];
+  for(let c=skuCol+1;c<totalCol;c++){
+    const name=String(rows[h][c]??'').replace(/\s+/g,' ').trim();
+    if(!name) continue;
+    candidates.push({ col:c, branch:name, po:String(poRow[c]??'').trim() });
+  }
+  let branches=candidates.filter(b=>b.po);
+  // No PO row at all: fall back to headers that are not obviously money.
+  if(!branches.length) branches=candidates.filter(b=>!MONEY.test(norm(b.branch)));
+  if(!branches.length) return null;
+
+  // Customer: the first real text above the header that is not a label.
+  let customer='';
+  for(let i=0;i<h;i++){
+    for(const cell of (rows[i]||[])){
+      const v=String(cell??'').trim();
+      if(v.length>3 && !/:$/.test(v) && !/^\d/.test(v) && norm(v)!=='CUSTOMER NAME'){ customer=v; break; }
+    }
+    if(customer) break;
+  }
+
+  const items=[];
+  for(let r=h+2;r<rows.length;r++){
+    const row=rows[r]||[];
+    const sku=String(row[skuCol]??'').trim();
+    if(!sku) continue;
+    if(/^(PREPARED|CHECKED|NOTED|TOTAL)\b/i.test(sku)) break;
+    const packing=packCol>=0?Number(String(row[packCol]??'').replace(/[^0-9.]/g,'')):null;
+    branches.forEach(b=>{
+      const q=Number(String(row[b.col]??'').replace(/[^0-9.\-]/g,''));
+      if(q>0) items.push({ po:b.po||b.branch, branch:b.branch, sku, qty:q,
+        customer, packing:packing||null });
+    });
+  }
+  if(!items.length) return null;
+  return { customer, branches, items };
+}
+
+/** Read every sheet of a workbook, looking for the branch layout. */
+async function readOrderWorkbook(file){
+  const buf=await file.arrayBuffer();
+  const wb=XLSX.read(buf,{type:'array'});
+  for(const name of wb.SheetNames){
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,blankrows:false,defval:''});
+    const hit=readBranchSummary(rows);
+    if(hit) return { sheet:name, ...hit };
+  }
+  return null;
+}
+
 const orderImporter = makeImporter({
   fields:ORDER_FIELDS, labels:ORDER_LABEL, required:['po','sku','qty'], wanted:['customer'],
   ids: importerIds('o'),
@@ -7544,11 +7626,22 @@ function renderOrders(){
       <button class="btn quiet" id="o-toggle">${ordImportOpen?'Close':'Open'}</button>
     </div>
     <div id="o-importwrap" class="${ordImportOpen?'':'hidden'}" style="margin-top:16px">
+      <div class="card" style="margin-bottom:14px">
+        <h2 style="font-size:17px">Order summary</h2>
+        <p class="lead">Your usual summary, unchanged. The branch columns are read as separate
+        orders, each with its own PO number from the row under the headings.</p>
+        <div class="row" style="margin-top:0">
+          <div style="flex:1;min-width:240px">
+            <label style="display:block;font-size:12.5px;font-weight:500;color:var(--ink-2);margin-bottom:5px">Summary file (.xlsx, .xls)</label>
+            <input type="file" id="os-file" accept=".xlsx,.xls" style="width:100%">
+          </div>
+        </div>
+        <div id="os-preview"></div>
+      </div>
+
       <div class="card" style="margin-bottom:0">
-        ${importerMarkup('o',{ title:'Import orders',
-          lede:'Every sheet with a PO column is read. One row per SKU per order; the same SKU '
-            +'twice on a PO is added together. Re-uploading a PO updates its quantities and '
-            +'leaves anything already picked alone.',
+        ${importerMarkup('o',{ title:'Or a plain list',
+          lede:'For a simple file with one row per SKU and a PO column of its own.',
           commitLabel:'Save orders' })}
       </div>
     </div>
@@ -7573,7 +7666,7 @@ function renderOrders(){
         return `<tr>
           <td class="mono"><button data-oopen="${esc(o.ref)}" style="appearance:none;background:none;
             border:0;padding:0;font:inherit;color:var(--king-deep);cursor:pointer">${esc(o.ref)}</button></td>
-          <td>${esc(o.customer||'—')}</td>
+          <td>${esc(o.customer||'—')}${o.branch?`<div style="font-size:11px;color:var(--ink-3)">${esc(o.branch)}</div>`:''}</td>
           <td class="mono" style="font-size:11.5px">${esc(o.at||'')}</td>
           <td class="num">${o.lines.length}</td>
           <td class="num">${ord.toLocaleString()}</td>
@@ -7595,9 +7688,9 @@ function renderOrders(){
     ordImportOpen=!ordImportOpen;
     $('#o-importwrap').classList.toggle('hidden',!ordImportOpen);
     $('#o-toggle').textContent=ordImportOpen?'Close':'Open';
-    if(ordImportOpen) orderImporter.wire();
+    if(ordImportOpen) wireSummaryImport();
   };
-  if(ordImportOpen) orderImporter.wire();
+  if(ordImportOpen) wireSummaryImport();
   $('#o-csv').onclick=downloadOrdersCsv;
   $('#p-orders').querySelectorAll('[data-oopen]').forEach(b=>b.onclick=()=>{
     openOrderRef = openOrderRef===b.dataset.oopen ? '' : b.dataset.oopen;
@@ -7607,6 +7700,61 @@ function renderOrders(){
   if(openOrderRef) drawOrderDetail();
 }
 let ordImportOpen=false;
+let summaryFound=null;
+
+function wireSummaryImport(){
+  orderImporter.wire();
+  const f=$('#os-file');
+  if(!f) return;
+  f.onchange=async e=>{
+    const file=e.target.files[0];
+    const host=$('#os-preview');
+    summaryFound=null;
+    if(!file){ host.innerHTML=''; return; }
+    host.innerHTML='<div class="note">Reading…</div>';
+    try{
+      const found=await readOrderWorkbook(file);
+      if(!found){
+        host.innerHTML=`<div class="note warn">This does not look like the branch summary layout —
+          no item column with branch columns beside it. Use the plain list below, which lets you
+          bind the columns by hand.</div>`;
+        return;
+      }
+      summaryFound=found;
+      const perPo={};
+      found.items.forEach(it=>{ perPo[it.po]=perPo[it.po]||{branch:it.branch,lines:0,qty:0};
+        perPo[it.po].lines++; perPo[it.po].qty+=it.qty; });
+      const unknown=[...new Set(found.items.map(i=>i.sku))].filter(sk=>!catInfo(sk));
+      host.innerHTML=`
+        <div class="note ok">Read <strong>${esc(found.sheet)}</strong> — ${esc(found.customer||'no customer name found')}.</div>
+        <table style="margin-top:10px"><thead><tr><th>PO</th><th>Branch</th>
+          <th class="num">SKUs</th><th class="num">Pieces</th></tr></thead>
+          <tbody>${Object.entries(perPo).map(([po,v])=>`<tr>
+            <td class="mono">${esc(po)}</td><td>${esc(v.branch)}</td>
+            <td class="num">${v.lines}</td><td class="num">${v.qty.toLocaleString()}</td></tr>`).join('')}
+          </tbody></table>
+        ${unknown.length?`<div class="note warn">${unknown.length} SKU${unknown.length===1?'':'s'}
+          not in the catalog: ${esc(unknown.slice(0,8).join(', '))}${unknown.length>8?'…':''}.
+          They can still be ordered and picked.</div>`:''}
+        <div class="row"><button class="btn" id="os-save">Save ${Object.keys(perPo).length} order${
+          Object.keys(perPo).length===1?'':'s'}</button></div>
+        <div class="log hidden" id="os-log"></div>`;
+
+      $('#os-save').onclick=()=>{
+        const rows=found.items.map((it,i)=>({ __row:`${found.sheet}!${i+1}`, po:it.po, sku:it.sku,
+          qty:it.qty, customer:it.customer, branch:it.branch }));
+        const out=commitOrders(rows,{dryRun:false});
+        const log=$('#os-log');
+        log.classList.remove('hidden');
+        log.textContent=`${out.summary.orders} order(s) saved — ${out.summary.created} new, `
+          +`${out.summary.merged} updated.`;
+        renderOrders();
+      };
+    }catch(err){
+      host.innerHTML=`<div class="note bad">Could not read that file: ${esc(err.message)}</div>`;
+    }
+  };
+}
 
 function drawOrderDetail(){
   const o=(S.orders||[]).find(x=>x.ref===openOrderRef);
