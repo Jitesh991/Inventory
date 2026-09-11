@@ -7390,6 +7390,41 @@ async function renderUsers(){
    ============================================================ */
 let poLines=[], poRack='', poLoc='', poUnit='box';
 
+/* The regular fleet and drivers. "Other" stays available so an unusual truck
+   or a relief driver never blocks a dispatch. */
+const TRUCKS  = ['NAF 1210','NDO 3487','NDO 3491','NAX 5455'];
+const DRIVERS = ['Ruel','Gerson','Leandro','Albert','Victor'];
+
+/** A select of known values plus an Other box that appears only when needed. */
+function pickerField(id, label, list, current){
+  const known = !current || list.includes(current);
+  return `<div><label>${label}</label>
+    <select id="po-${id}" style="width:100%">
+      <option value="">— choose —</option>
+      ${list.map(v=>`<option value="${esc(v)}" ${v===current?'selected':''}>${esc(v)}</option>`).join('')}
+      <option value="__other" ${!known?'selected':''}>Other…</option>
+    </select>
+    <input type="text" id="po-${id}-other" placeholder="type it in"
+      value="${known?'':esc(current)}" class="${known?'hidden':''}" style="width:100%;margin-top:6px">
+  </div>`;
+}
+/** Read a picker: the select unless Other is chosen. */
+function pickerValue(id){
+  const sel=$('#po-'+id); if(!sel) return '';
+  return sel.value==='__other' ? ($('#po-'+id+'-other').value||'').trim() : sel.value;
+}
+function wirePicker(id){
+  const sel=$('#po-'+id), other=$('#po-'+id+'-other');
+  if(!sel||!other) return;
+  sel.onchange=()=>{
+    const isOther=sel.value==='__other';
+    other.classList.toggle('hidden',!isOther);
+    if(isOther) other.focus();
+    poMeta[id]=pickerValue(id);
+  };
+  other.oninput=()=>{ poMeta[id]=pickerValue(id); };
+}
+
 function poFindStock(sku){
   // Where this SKU is, most stocked first, so the obvious slot is offered.
   const out=[];
@@ -7455,9 +7490,8 @@ function renderPullout(){
         padding:14px 16px;margin-top:14px">
         <h3 style="margin-bottom:10px">Truck and driver</h3>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
-          <div><label>Truck / plate</label><input type="text" id="po-truck" value="${esc(poMeta.truck||'')}" style="width:100%;text-transform:uppercase"></div>
-          <div><label>Driver</label><input type="text" id="po-driver" value="${esc(poMeta.driver||'')}" style="width:100%"></div>
-          <div><label>Contact</label><input type="text" id="po-contact" value="${esc(poMeta.contact||'')}" style="width:100%"></div>
+          ${pickerField('truck','Truck / plate',TRUCKS,poMeta.truck||'')}
+          ${pickerField('driver','Driver',DRIVERS,poMeta.driver||'')}
           <div><label>Destination</label><input type="text" id="po-dest" value="${esc(poMeta.destination||'')}" style="width:100%"></div>
           <div><label>Date and time out</label><input type="datetime-local" id="po-at" value="${esc(poMeta.at||nowLocal())}" style="width:100%"></div>
         </div>
@@ -7474,6 +7508,7 @@ function renderPullout(){
   </div>
 
   <div class="card">
+    <div id="po-editor" class="card hidden" style="border-color:var(--king);margin:0 0 14px"></div>
     <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
       <h3 style="margin:0">Pullouts recorded</h3>
       <span style="flex:1"></span>
@@ -7481,7 +7516,8 @@ function renderPullout(){
     </div>
     ${history.length?`<div class="scroll cap" style="margin-top:12px"><table>
       <thead><tr><th>Reference</th><th>Out</th><th>Truck</th><th>Driver</th><th>Destination</th>
-        <th class="num">SKUs</th><th class="num">Pieces</th><th>Lark</th></tr></thead>
+        <th class="num">SKUs</th><th class="num">Pieces</th><th>Lark</th>${
+        isAdmin()?'<th></th>':''}</tr></thead>
       <tbody>${history.map(d=>`<tr>
         <td class="mono">${esc(d.ref)}</td>
         <td class="mono" style="font-size:11.5px">${esc(d.at)}</td>
@@ -7491,6 +7527,10 @@ function renderPullout(){
         <td class="num">${d.lines.length}</td>
         <td class="num">${d.lines.reduce((a,l)=>a+l.qty,0).toLocaleString()}</td>
         <td><span class="pill ${d.lark>0?'ok':'warn'}">${d.lark>0?`sent ×${d.lark}`:'not sent'}</span></td>
+        ${isAdmin()?`<td style="text-align:right;white-space:nowrap">
+          <button class="btn ghost" data-poedit="${esc(d.ref)}" style="padding:2px 9px">Edit</button>
+          <button class="btn quiet" data-podelete="${esc(d.ref)}" style="padding:2px 9px;color:var(--terra)">Delete</button>
+        </td>`:''}
       </tr>`).join('')}</tbody></table></div>`
       :'<p class="lead" style="margin:10px 0 0">No pullouts yet.</p>'}
   </div>`;
@@ -7505,7 +7545,8 @@ function renderPullout(){
   $('#po-count').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); code.focus(); } };
   $('#p-pullout').querySelectorAll('[data-podel]').forEach(b=>b.onclick=()=>{
     poLines.splice(+b.dataset.podel,1); renderPullout(); });
-  ['truck','driver','contact','dest','at','note'].forEach(f=>{
+  wirePicker('truck'); wirePicker('driver');
+  ['dest','at','note'].forEach(f=>{
     const el=$('#po-'+f); if(!el) return;
     el.oninput=()=>{ poMeta[f==='dest'?'destination':f]=el.value; };
   });
@@ -7514,6 +7555,8 @@ function renderPullout(){
     if(!confirm('Discard this truck load?')) return;
     poLines=[]; poMeta={}; renderPullout(); });
   $('#po-csv').onclick=downloadDispatchCsv;
+  $('#p-pullout').querySelectorAll('[data-poedit]').forEach(b=>b.onclick=()=>openDispatchEditor(b.dataset.poedit));
+  $('#p-pullout').querySelectorAll('[data-podelete]').forEach(b=>b.onclick=()=>deleteDispatch(b.dataset.podelete));
   code.focus();
 }
 let poMeta={};
@@ -7583,8 +7626,8 @@ function releasePullout(){
   const fail=t=>{ err.textContent=t; err.classList.remove('hidden'); };
   err.classList.add('hidden');
   if(!poLines.length) return fail('Nothing on the truck yet.');
-  if(!($('#po-truck').value||'').trim()) return fail('Enter the truck or plate number.');
-  if(!($('#po-driver').value||'').trim()) return fail('Enter the driver.');
+  if(!pickerValue('truck')) return fail('Choose the truck.');
+  if(!pickerValue('driver')) return fail('Choose the driver.');
 
   const at=$('#po-at').value ? new Date($('#po-at').value) : new Date();
   const ref='PO-'+at.getFullYear()+String(at.getMonth()+1).padStart(2,'0')
@@ -7616,9 +7659,8 @@ function releasePullout(){
   });
 
   const record={ ref, at:at.toLocaleString(), iso:at.toISOString(),
-    truck:($('#po-truck').value||'').trim().toUpperCase(),
-    driver:($('#po-driver').value||'').trim(),
-    contact:($('#po-contact').value||'').trim(),
+    truck:pickerValue('truck').toUpperCase(),
+    driver:pickerValue('driver'),
     destination:($('#po-dest').value||'').trim(),
     note:($('#po-note').value||'').trim(),
     by: ME?.name||ME?.username||'', lines, lark:0 };
@@ -7650,11 +7692,170 @@ function releasePullout(){
     });
 }
 
+/**
+ * Put stock back where a pullout took it from. Used when a record is deleted
+ * or a quantity is reduced — without this, correcting a mistake would fix the
+ * paperwork and leave the map permanently short.
+ */
+function returnStock(loc, sku, qty, packing){
+  if(!(qty>0)) return;
+  S.inv[loc]=S.inv[loc]||[];
+  const line=S.inv[loc].find(x=>x.sku===sku);
+  if(line){
+    line.qty=(+line.qty||0)+qty;
+    if(line.packing&&line.boxes!=null) line.boxes=+(line.qty/line.packing).toFixed(2);
+  } else {
+    S.inv[loc].push({sku,boxes:null,packing:packing??null,qty});
+  }
+}
+/** Take more stock, the way a release does. Returns true if it went negative. */
+function takeStock(loc, sku, qty, packing){
+  if(!(qty>0)) return false;
+  const arr=S.inv[loc]=S.inv[loc]||[];
+  let left=qty;
+  arr.filter(x=>x.sku===sku).forEach(x=>{
+    const take=Math.min(+x.qty||0,left);
+    x.qty=(+x.qty||0)-take;
+    if(x.packing&&x.boxes!=null) x.boxes=+(x.qty/x.packing).toFixed(2);
+    left-=take;
+  });
+  if(left>0){
+    const first=arr.find(x=>x.sku===sku);
+    if(first) first.qty=(+first.qty||0)-left;
+    else arr.push({sku,boxes:null,packing:packing??null,qty:-left});
+    return true;
+  }
+  return false;
+}
+function tidySlot(loc){
+  if(!S.inv[loc]) return;
+  S.inv[loc]=S.inv[loc].filter(x=>(+x.qty||0)!==0);
+  if(!S.inv[loc].length) delete S.inv[loc];
+}
+
+function openDispatchEditor(ref){
+  if(!isAdmin()) return;
+  const d=(S.dispatches||[]).find(x=>x.ref===ref);
+  if(!d) return;
+  const host=$('#po-editor');
+  host.classList.remove('hidden');
+  const known=(list,v)=>!v||list.includes(v);
+  host.innerHTML=`
+    <h3>Edit ${esc(d.ref)}</h3>
+    <p class="lead" style="margin:0 0 12px">Changing a quantity moves the difference back to, or out
+    of, the slot it came from. Lark is not re-sent — the message already went out.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+      <div><label>Truck / plate</label>
+        <select id="de-truck" style="width:100%">
+          ${TRUCKS.map(v=>`<option ${v===d.truck?'selected':''}>${esc(v)}</option>`).join('')}
+          <option value="__other" ${known(TRUCKS,d.truck)?'':'selected'}>Other…</option>
+        </select>
+        <input type="text" id="de-truck-other" value="${known(TRUCKS,d.truck)?'':esc(d.truck)}"
+          class="${known(TRUCKS,d.truck)?'hidden':''}" style="width:100%;margin-top:6px"></div>
+      <div><label>Driver</label>
+        <select id="de-driver" style="width:100%">
+          ${DRIVERS.map(v=>`<option ${v===d.driver?'selected':''}>${esc(v)}</option>`).join('')}
+          <option value="__other" ${known(DRIVERS,d.driver)?'':'selected'}>Other…</option>
+        </select>
+        <input type="text" id="de-driver-other" value="${known(DRIVERS,d.driver)?'':esc(d.driver)}"
+          class="${known(DRIVERS,d.driver)?'hidden':''}" style="width:100%;margin-top:6px"></div>
+      <div><label>Destination</label><input type="text" id="de-dest" value="${esc(d.destination||'')}" style="width:100%"></div>
+      <div><label>Date and time out</label><input type="text" id="de-at" value="${esc(d.at||'')}" style="width:100%"></div>
+    </div>
+    <div style="margin-top:12px"><label>Note</label>
+      <input type="text" id="de-note" value="${esc(d.note||'')}" style="width:100%"></div>
+
+    <div class="scroll" style="margin-top:14px"><table>
+      <thead><tr><th>Slot</th><th>SKU</th><th class="num">Pieces</th><th class="num">In slot now</th><th></th></tr></thead>
+      <tbody>${d.lines.map((l,i)=>`<tr>
+        <td class="mono">${esc(l.loc)}</td>
+        <td class="mono">${esc(l.sku)}</td>
+        <td class="num"><input type="number" min="0" step="1" data-deqty="${i}" value="${l.qty}"
+          style="width:96px;text-align:right;font-family:var(--mono)"></td>
+        <td class="num">${qtyOf(l.loc).toLocaleString()}</td>
+        <td style="text-align:right"><button class="btn quiet" data-deline="${i}" style="padding:2px 8px">Remove line</button></td>
+      </tr>`).join('')}</tbody></table></div>
+
+    <div id="de-err" class="note bad hidden"></div>
+    <div class="row">
+      <button class="btn" id="de-save">Save changes</button>
+      <button class="btn quiet" id="de-cancel">Cancel</button>
+    </div>`;
+
+  [['de-truck',TRUCKS],['de-driver',DRIVERS]].forEach(([id])=>{
+    const sel=$('#'+id), other=$('#'+id+'-other');
+    sel.onchange=()=>{ const o=sel.value==='__other';
+      other.classList.toggle('hidden',!o); if(o) other.focus(); };
+  });
+
+  $('#de-cancel').onclick=()=>{ host.classList.add('hidden'); host.innerHTML=''; };
+
+  host.querySelectorAll('[data-deline]').forEach(b=>b.onclick=()=>{
+    const i=+b.dataset.deline, l=d.lines[i];
+    if(!confirm(`Remove ${l.sku} from ${d.ref}? ${l.qty.toLocaleString()} pcs go back to ${l.loc}.`)) return;
+    returnStock(l.loc,l.sku,l.qty,l.packing);
+    tidySlot(l.loc);
+    d.lines.splice(i,1);
+    if(!d.lines.length){
+      S.dispatches=S.dispatches.filter(x=>x!==d);
+      host.classList.add('hidden'); host.innerHTML='';
+      commit(); renderPullout(); toast(`${ref} had no lines left and was removed`);
+      return;
+    }
+    commit(); renderPullout(); openDispatchEditor(ref);
+  });
+
+  $('#de-save').onclick=()=>{
+    const val=(id,list)=>{ const sel=$('#'+id);
+      return sel.value==='__other' ? ($('#'+id+'-other').value||'').trim() : sel.value; };
+    const truck=val('de-truck',TRUCKS), driver=val('de-driver',DRIVERS);
+    if(!truck||!driver){
+      $('#de-err').textContent='Truck and driver are both needed.';
+      $('#de-err').classList.remove('hidden'); return;
+    }
+    let wentNegative=false;
+    d.lines.forEach((l,i)=>{
+      const input=host.querySelector(`[data-deqty="${i}"]`);
+      const next=Math.max(0,Math.round(Number(input.value)||0));
+      const delta=next-l.qty;
+      if(delta>0) wentNegative=takeStock(l.loc,l.sku,delta,l.packing)||wentNegative;
+      else if(delta<0) returnStock(l.loc,l.sku,-delta,l.packing);
+      tidySlot(l.loc);
+      l.qty=next;
+      if(l.packing&&l.boxes!=null) l.boxes=+(next/l.packing).toFixed(2);
+      l.short = qtyOf(l.loc)<0;
+    });
+    d.lines=d.lines.filter(l=>l.qty>0);
+    d.truck=truck.toUpperCase(); d.driver=driver;
+    d.destination=$('#de-dest').value.trim();
+    d.at=$('#de-at').value.trim();
+    d.note=$('#de-note').value.trim();
+    d.editedBy=ME?.name||ME?.username||''; d.editedAt=new Date().toLocaleString();
+    if(!d.lines.length) S.dispatches=S.dispatches.filter(x=>x!==d);
+    host.classList.add('hidden'); host.innerHTML='';
+    commit(); renderPullout();
+    toast(`${ref} updated${wentNegative?' — a slot went negative':''}`);
+  };
+}
+
+function deleteDispatch(ref){
+  if(!isAdmin()) return;
+  const d=(S.dispatches||[]).find(x=>x.ref===ref);
+  if(!d) return;
+  const pcs=d.lines.reduce((a,l)=>a+l.qty,0);
+  if(!confirm(`Delete ${ref}?\n\n${pcs.toLocaleString()} pieces across ${d.lines.length} line${
+    d.lines.length===1?'':'s'} go back into their slots. The Lark message already sent cannot be recalled.`)) return;
+  d.lines.forEach(l=>{ returnStock(l.loc,l.sku,l.qty,l.packing); tidySlot(l.loc); });
+  S.dispatches=S.dispatches.filter(x=>x!==d);
+  commit(); renderPullout();
+  toast(`${ref} deleted, stock returned`);
+}
+
 function downloadDispatchCsv(){
-  const rows=[['Reference','Date out','Truck','Driver','Contact','Destination','Released by',
+  const rows=[['Reference','Date out','Truck','Driver','Destination','Released by',
     'Slot','SKU','Brand','Boxes','Pieces','Short','Note']];
   (S.dispatches||[]).forEach(d=>d.lines.forEach(l=>rows.push([d.ref,d.at,d.truck,d.driver,
-    d.contact,d.destination,d.by,l.loc,l.sku,l.brand||'',l.boxes??'',l.qty,l.short?'YES':'',d.note])));
+    d.destination,d.by,l.loc,l.sku,l.brand||'',l.boxes??'',l.qty,l.short?'YES':'',d.note])));
   if(rows.length===1) return toast('No pullouts recorded yet');
   const csv=rows.map(r=>r.map(v=>/[",\n]/.test(String(v))?`"${String(v).replace(/"/g,'""')}"`:v).join(',')).join('\n');
   download('pullouts.csv',csv,'text/csv');
