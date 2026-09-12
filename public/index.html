@@ -43,6 +43,38 @@ button{cursor:pointer}
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
 
 .brandbar{padding:18px 18px 14px;border-bottom:1px solid rgba(255,255,255,.28)}
+.brandpanel{background:#fff;border-radius:9px;padding:11px 13px;display:flex;
+  align-items:center;justify-content:center;box-shadow:0 1px 2px rgba(0,0,0,.10)}
+.brandpanel img{width:100%;max-width:150px;height:auto;display:block}
+.brandfallback{font:600 14px var(--sans);color:var(--king-deep);text-align:center}
+.brandsub{margin-top:9px;font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;
+  text-transform:uppercase;color:rgba(255,255,255,.85);display:flex;justify-content:space-between;gap:8px}
+.brandsub span{letter-spacing:0;text-transform:none;color:rgba(255,255,255,.72)}
+
+/* Vertical navigation, in the Reorder idiom: white chip for the current page. */
+.railnav{padding:12px 10px 6px;flex:0 0 auto}
+.railnav .navgroup{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;
+  color:rgba(255,255,255,.66);padding:12px 9px 5px}
+.railnav .navgroup:first-child{padding-top:2px}
+.railnav button{display:flex;align-items:center;gap:9px;width:100%;appearance:none;background:none;
+  border:0;border-radius:7px;padding:8px 10px;font:500 13.5px var(--sans);color:rgba(255,255,255,.92);
+  cursor:pointer;text-align:left;transition:background .12s,color .12s}
+.railnav button:hover{background:rgba(255,255,255,.16);color:#fff}
+.railnav button.on{background:#fff;color:var(--king-deep);font-weight:600}
+.railnav button .dot{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.45;flex:none}
+.railnav button.on .dot{opacity:1}
+
+/* Map controls: horizontal, and only while the map is open. */
+.mapbar{display:flex;align-items:center;gap:18px;padding:9px 20px;background:var(--card);
+  border-bottom:1px solid var(--line);overflow-x:auto;flex:0 0 auto}
+.mapbar.hidden{display:none}
+.mb-group{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.mb-group.mb-grow{flex:1 1 auto;min-width:0}
+.mb-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);
+  font-weight:600;white-space:nowrap}
+.mb-check{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--ink-2);white-space:nowrap}
+.palette-h{display:flex;gap:5px;overflow-x:auto;padding:2px;min-width:0}
+.rackfilter-h{display:flex;gap:4px;overflow-x:auto;max-width:280px;padding:2px}
 .brandrow{display:flex;align-items:center;gap:10px}
 .brandlogo{height:34px;width:auto;max-width:150px;object-fit:contain;display:block}
 .brandtile{width:34px;height:34px;flex:0 0 34px;border-radius:9px;background:rgba(255,255,255,.16);
@@ -61,40 +93,48 @@ button{cursor:pointer}
 
 /* brand chips: same shape as a Reorder nav button, with a colour swatch
    standing in for the dot, and the active state as a solid white chip. */
-.chip{display:flex;align-items:center;gap:6px;width:100%;padding:8px 9px;margin-bottom:2px;background:transparent;border:0;border-radius:7px;text-align:left;color:rgba(255,255,255,.92);transition:background .12s,color .12s}
-.chip:hover{background:rgba(255,255,255,.16);color:#fff}
-.chip.on{background:#fff;color:var(--king-deep);font-weight:600}
-.chip.on .nm{color:var(--king-deep)}
+.chip{display:flex;align-items:center;gap:6px;padding:5px 9px;background:var(--porcelain);
+  border:1px solid var(--line);border-radius:99px;text-align:left;color:var(--ink);
+  white-space:nowrap;flex:0 0 auto;transition:background .12s,border-color .12s}
+.chip:hover{background:#fff;border-color:var(--ink-3)}
+.chip.on{background:var(--ink);border-color:var(--ink);color:#fff}
+.chip.on .nm{color:#fff}
 .chip .sw{width:13px;height:13px;flex:0 0 13px;border-radius:3px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.22)}
-.chip .nm{flex:1 1 auto;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chip .ct{flex:0 0 auto;font-family:var(--mono);font-size:11px;color:rgba(255,255,255,.75)}
-.chip.on .ct{color:var(--king-deep);opacity:.7}
-.chip kbd{flex:0 0 auto;font-family:var(--mono);font-size:9px;color:rgba(255,255,255,.75);border:1px solid rgba(255,255,255,.35);border-radius:3px;padding:0 3px}
+.chip .nm{font-size:12px;white-space:nowrap}
+.chip .ct{flex:0 0 auto;font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.chip.on .ct{color:rgba(255,255,255,.8)}
+.chip kbd{flex:0 0 auto;font-family:var(--mono);font-size:9px;color:var(--ink-3);border:1px solid var(--line-2);border-radius:3px;padding:0 3px}
 .chip:hover kbd{display:none}
-.chip .del{width:17px;height:17px;flex:0 0 17px;border:0;background:transparent;color:rgba(255,255,255,.85);border-radius:4px;
+.chip .del{width:16px;height:16px;flex:0 0 16px;border:0;background:transparent;color:var(--ink-3);border-radius:4px;
   font-size:14px;line-height:1;display:none;align-items:center;justify-content:center;padding:0}
 .chip:hover .del{display:flex}
-.chip.on .del{color:var(--king-deep)}
+.chip.on .del{color:rgba(255,255,255,.9)}
 .chip .del:hover{background:var(--king);color:#fff}
 .chip.on .del:hover{background:var(--king);color:#fff}
 
+.rackfilter-h .railbtn{width:auto;flex:0 0 auto;padding:4px 9px;border-radius:99px;
+  background:var(--porcelain);border:1px solid var(--line);color:var(--ink-2);
+  font:500 11.5px var(--sans);margin:0;white-space:nowrap}
+.rackfilter-h .railbtn:hover{background:#fff;border-color:var(--ink-3);color:var(--ink)}
 .railbtn{width:100%;appearance:none;padding:8px 9px;background:rgba(0,0,0,.10);border:1px solid rgba(255,255,255,.28);border-radius:7px;color:#fff;font:500 12.5px var(--sans);text-align:left;margin-bottom:4px;transition:background .12s}
 .railbtn:hover{background:rgba(0,0,0,.22)}
 .railbtn.warn:hover{background:rgba(0,0,0,.22);border-color:#fff}
 
 .tool{display:flex;gap:4px;margin-bottom:8px}
-.tool button{flex:1;padding:6px 4px;background:rgba(0,0,0,.10);border:1px solid rgba(255,255,255,.28);color:rgba(255,255,255,.85);font:500 11px var(--sans);border-radius:6px}
-.tool button:hover{color:#fff;border-color:rgba(255,255,255,.5)}
-.tool button.on{background:#fff;border-color:#fff;color:var(--king-deep);font-weight:600}
+.tool{display:flex;gap:4px;margin:0}
+.tool button{padding:5px 11px;background:var(--porcelain);border:1px solid var(--line);
+  color:var(--ink-2);font:500 12px var(--sans);border-radius:7px;white-space:nowrap}
+.tool button:hover{background:#fff;border-color:var(--ink-3);color:var(--ink)}
+.tool button.on{background:var(--king);border-color:var(--king);color:#fff;font-weight:600}
 
 .mini{font-size:11px;color:rgba(255,255,255,.78);line-height:1.5;margin:6px 0 0}
 
 /* ---------- topbar ---------- */
 .top{display:flex;align-items:center;gap:10px;padding:0 20px;height:58px;background:var(--card);border-bottom:1px solid var(--line);flex:0 0 58px}
 .tabs{display:flex;gap:3px}
-.tabs button{appearance:none;padding:7px 13px;background:transparent;border:0;border-radius:7px;font:500 13px var(--sans);color:var(--ink-2);transition:background .12s,color .12s}
-.tabs button:hover{background:var(--porcelain);color:var(--ink)}
-.tabs button.on{background:var(--king);color:#fff}
+.railnav button{appearance:none;padding:7px 13px;background:transparent;border:0;border-radius:7px;font:500 13px var(--sans);color:var(--ink-2);transition:background .12s,color .12s}
+.railnav button:hover{background:var(--porcelain);color:var(--ink)}
+.railnav button.on{background:var(--king);color:#fff}
 .spacer{flex:1}
 .stat{font-family:var(--mono);font-size:11.5px;color:var(--ink-2)}
 .stat b{color:var(--ink);font-weight:600}
@@ -127,7 +167,8 @@ button{cursor:pointer}
 .gate-foot{margin:24px 0 40px;font-size:12.5px;color:var(--ink-3)}
 .app.hidden{display:none}
 /* A scanner reads the map; the editing furniture is not theirs. */
-body.scanner #toolsec,
+body.scanner #mapbar .mb-group:nth-child(1),
+body.scanner #mapbar .mb-group:nth-child(2),
 body.scanner #addbrand,
 body.scanner #recolor,
 body.scanner #reset,
@@ -350,58 +391,34 @@ tbody tr:hover td{background:#faf7f4}
 <div class="app hidden">
   <aside class="rail">
     <div class="brandbar">
-      <div class="brandrow">
-        <!-- Drop logo.png (the white version) into public/ and it appears here.
-             Until then the lettermark stands in, so this never renders as a
-             broken image. -->
-        <img class="brandlogo" src="logo.png" alt=""
-          onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-        <span class="brandtile" style="display:none" aria-hidden="true">
-          <svg viewBox="0 0 32 32" width="22" height="22" fill="none">
-            <circle cx="16" cy="16" r="6.5" fill="#fff"/>
-            <g stroke="#fff" stroke-width="2.4" stroke-linecap="round">
-              <path d="M16 2.5v4"/><path d="M16 25.5v4"/>
-              <path d="M2.5 16h4"/><path d="M25.5 16h4"/>
-              <path d="M6.4 6.4l2.8 2.8"/><path d="M22.8 22.8l2.8 2.8"/>
-              <path d="M25.6 6.4l-2.8 2.8"/><path d="M9.2 22.8l-2.8 2.8"/>
-            </g>
-          </svg>
-        </span>
-        <div class="brandwords">
-          <strong>Sunbeams Impex Inc.</strong>
-          <span>Warehouse</span>
-        </div>
+      <!-- The mark is brand red, so it sits on a white panel rather than on
+           the orange gradient where it would disappear. -->
+      <div class="brandpanel">
+        <img src="logo.png" alt="Sunbeams Impex Inc."
+          onerror="this.replaceWith(Object.assign(document.createElement('span'),
+            {className:'brandfallback',textContent:'Sunbeams Impex Inc.'}))">
       </div>
-      <p id="subtitle">— slots · — assigned</p>
+      <div class="brandsub">Warehouse<span id="subtitle"></span></div>
     </div>
+
+    <nav class="railnav" id="railnav">
+      <div class="navgroup">Floor</div>
+      <button data-tab="map" class="on"><span class="dot"></span>Map</button>
+      <button data-tab="scan"><span class="dot"></span>Scan</button>
+      <button data-tab="orders"><span class="dot"></span>Orders</button>
+      <button data-tab="pullout"><span class="dot"></span>Pullout</button>
+
+      <div class="navgroup">Records</div>
+      <button data-tab="catalog"><span class="dot"></span>Catalog</button>
+      <button data-tab="inv"><span class="dot"></span>Inventory</button>
+      <button data-tab="summary"><span class="dot"></span>Dashboard</button>
+
+      <div class="navgroup">Setup</div>
+      <button data-tab="racks"><span class="dot"></span>Rack setup</button>
+      <button data-tab="users"><span class="dot"></span>Users</button>
+    </nav>
+
     <div class="railscroll">
-      <div class="sec" id="toolsec">
-        <h2>Tool</h2>
-        <div class="tool">
-          <button data-mode="paint" class="on">Paint</button>
-          <button data-mode="erase">Erase</button>
-          <button data-mode="structure">Slots</button>
-        </div>
-        <label class="mini" style="display:flex;gap:6px;align-items:center;color:rgba(255,255,255,.85)">
-          <input type="checkbox" id="addmode"> Add to cell instead of replacing
-        </label>
-        <label class="mini" style="display:flex;gap:6px;align-items:center;color:rgba(255,255,255,.85)">
-          <input type="checkbox" id="qtytoggle" checked> Show quantities on cells
-        </label>
-      </div>
-
-      <div class="sec">
-        <h2>Brands <span id="brandcount"></span></h2>
-        <div id="palette"></div>
-        <button class="railbtn" id="addbrand" style="margin-top:6px">+ Add brand</button>
-        <button class="railbtn" id="recolor">Restore official colours</button>
-      </div>
-
-      <div class="sec">
-        <h2>Racks</h2>
-        <div id="rackfilter"></div>
-      </div>
-
       <div class="sec">
         <h2>Data</h2>
         <button class="railbtn" id="exportcsv">Download CSV</button>
@@ -419,17 +436,6 @@ tbody tr:hover td{background:#faf7f4}
 
   <div class="main">
     <div class="top">
-      <div class="tabs">
-        <button data-tab="map" class="on">Map</button>
-        <button data-tab="catalog">Catalog</button>
-        <button data-tab="scan">Scan</button>
-        <button data-tab="inv">Inventory</button>
-        <button data-tab="orders">Orders</button>
-        <button data-tab="pullout">Pullout</button>
-        <button data-tab="summary">Dashboard</button>
-        <button data-tab="racks">Rack setup</button>
-        <button data-tab="users">Users</button>
-      </div>
       <div class="spacer"></div>
       <span class="savestate saved" id="savestate">Saved</span>
       <div style="text-align:right;line-height:1.2">
@@ -439,6 +445,30 @@ tbody tr:hover td{background:#faf7f4}
       <button class="btn quiet" id="btnPass" style="padding:5px 10px;font-size:12px">Password</button>
       <button class="btn quiet" id="btnOut" style="padding:5px 10px;font-size:12px">Sign out</button>
       <input class="find" id="find" placeholder="find A12.4 / NEST">
+    </div>
+    <div class="mapbar" id="mapbar">
+      <div class="mb-group">
+        <span class="mb-label">Tool</span>
+        <div class="tool">
+          <button data-mode="paint" class="on">Paint</button>
+          <button data-mode="erase">Erase</button>
+          <button data-mode="structure">Slots</button>
+        </div>
+      </div>
+      <div class="mb-group">
+        <label class="mb-check"><input type="checkbox" id="addmode"> Add, don't replace</label>
+        <label class="mb-check"><input type="checkbox" id="qtytoggle" checked> Show quantities</label>
+      </div>
+      <div class="mb-group mb-grow">
+        <span class="mb-label">Brands <span id="brandcount"></span></span>
+        <div id="palette" class="palette-h"></div>
+        <button class="btn quiet" id="addbrand" style="padding:4px 10px;font-size:12px">+ Brand</button>
+        <button class="btn quiet" id="recolor" style="padding:4px 10px;font-size:12px">Colours</button>
+      </div>
+      <div class="mb-group">
+        <span class="mb-label">Racks</span>
+        <div id="rackfilter" class="rackfilter-h"></div>
+      </div>
     </div>
     <div class="canvas" id="canvas"></div>
     <div class="panel hidden" id="p-catalog"></div>
@@ -612,7 +642,7 @@ async function enterApp(){
     (ROLES.find(r=>r.id===ME?.role)?.label || ME?.role || '').toUpperCase();
 
   let first=null;
-  document.querySelectorAll('.tabs button').forEach(b=>{
+  document.querySelectorAll('.railnav button').forEach(b=>{
     const need=TAB_ROLES[b.dataset.tab];
     const ok = !need || ME?.role===need;
     b.style.display = ok ? '' : 'none';
@@ -8794,8 +8824,8 @@ $('#reset').onclick=()=>{
 /* ============================================================
    Tabs + boot
    ============================================================ */
-document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
+document.querySelectorAll('.railnav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.railnav button').forEach(x=>x.classList.toggle('on',x===b));
   const t=b.dataset.tab;
   $('#canvas').classList.toggle('hidden',t!=='map');
   $('#p-catalog').classList.toggle('hidden',t!=='catalog');
@@ -8806,7 +8836,8 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   $('#p-summary').classList.toggle('hidden',t!=='summary');
   $('#p-racks').classList.toggle('hidden',t!=='racks');
   $('#p-users').classList.toggle('hidden',t!=='users');
-  $('#toolsec').style.display = t==='map'?'':'none';
+  // The painting controls belong to the map and nowhere else.
+  $('#mapbar').classList.toggle('hidden', t!=='map');
   if(t!=='scan'&&camStream){ camStream.getTracks().forEach(x=>x.stop()); camStream=null; }
   if(t==='catalog') renderCatalog();
   if(t==='inv') renderInv();
