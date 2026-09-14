@@ -29,11 +29,12 @@ function buildCard(d) {
   facts.push({ is_short: true, text: { tag: 'lark_md', content: `**Pulled out**\n${d.at}` } });
   facts.push({ is_short: true, text: { tag: 'lark_md', content: `**Released by**\n${d.by}` } });
 
+  // The slot is deliberately left out: whoever reads this in Lark cares what
+  // went on the truck, not which shelf it came off.
   const rows = lines.map(l =>
-    `**${l.sku}**  ·  ${money(l.qty)} pcs${l.boxes ? ` (${money(l.boxes)} box${l.boxes === 1 ? '' : 'es'})` : ''}  ·  \`${l.loc}\``
+    `**${l.sku}**  ·  ${money(l.qty)} pcs${l.boxes ? ` (${money(l.boxes)} box${l.boxes === 1 ? '' : 'es'})` : ''}`
   ).join('\n');
 
-  const shortfalls = lines.filter(l => l.short);
   const elements = [
     { tag: 'div', fields: facts },
     { tag: 'hr' },
@@ -42,16 +43,9 @@ function buildCard(d) {
     { tag: 'div', text: { tag: 'lark_md', content: rows || '_no lines_' } }
   ];
 
-  if (shortfalls.length) {
-    elements.push({ tag: 'hr' });
-    elements.push({ tag: 'div', text: { tag: 'lark_md',
-      content: '⚠️ **Pulled more than was recorded** at: '
-        + shortfalls.map(l => `\`${l.loc}\` ${l.sku}`).join(', ')
-        + '\nThe slot now shows a negative balance and needs a recount.' } });
-  }
   if (d.note) {
     elements.push({ tag: 'hr' });
-    elements.push({ tag: 'div', text: { tag: 'lark_md', content: `**Note**\n${d.note}` } });
+    elements.push({ tag: 'div', text: { tag: 'lark_md', content: `**Notes**\n${d.note}` } });
   }
   elements.push({ tag: 'note', elements: [
     { tag: 'plain_text', content: `Sunbeams Impex · Warehouse · ${d.ref}` } ] });
@@ -60,9 +54,8 @@ function buildCard(d) {
     msg_type: 'interactive',
     card: {
       config: { wide_screen_mode: true },
-      // Red for a shortfall, the usual brand-ish orange otherwise.
       header: {
-        template: shortfalls.length ? 'red' : 'orange',
+        template: 'orange',
         title: { tag: 'plain_text', content: `Pullout · ${d.truck || 'no truck'}` }
       },
       elements
