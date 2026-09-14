@@ -1,106 +1,269 @@
-import { requireUser } from './_auth.js';
+const crypto = require('crypto');
 
-/**
- * Send a pullout to Lark.
- *
- * Called from the server rather than the browser for two reasons: the webhook
- * URLs stay out of the page, and Lark does not allow cross-origin posts from a
- * browser anyway.
- *
- * Set LARK_WEBHOOK_1 and, if you want a second bot, LARK_WEBHOOK_2.
- */
+const SECRET   = process.env.JWT_SECRET || 'sii-dev-secret-CHANGE-IN-PRODUCTION';
+const LARK_API = 'https://open.larksuite.com/open-apis';
 
-const money = n => Number(n || 0).toLocaleString();
+// Webhook URLs live here, server-side, so they never reach the browser.
+// Set these in Vercel → Settings → Environment Variables.
+const HOOKS = {
+  delivery: process.env.LARK_HOOK_DELIVERY,
+  drivers:  process.env.LARK_HOOK_DRIVERS,
+  sm:       process.env.LARK_HOOK_SM
+};
 
-/** Lark's interactive card — the coloured-header format. */
-function buildCard(d) {
-  const lines = (d.lines || []);
-  const totalPcs = lines.reduce((a, l) => a + (Number(l.qty) || 0), 0);
+const LABELS = {
+  delivery: 'Delivery team',
+  drivers:  'Drivers & Helpers',
+  sm:       'SM promodizer'
+};
 
-  // Two columns of facts, then the SKU list, then a footer note.
-  const facts = [
-    ['Truck', d.truck], ['Driver', d.driver],
-    ['Contact', d.contact], ['Destination', d.destination]
-  ].filter(([, v]) => v).map(([k, v]) => ({
-    is_short: true,
-    text: { tag: 'lark_md', content: `**${k}**\n${v}` }
-  }));
+// ── Auth (same HMAC scheme as /api/data) ─────────────────────────────────────
+function verifyToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const dot = token.lastIndexOf('.');
+  if (dot === -1) return null;
+  const data = token.slice(0, dot), sig = token.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', SECRET).update(data).digest('hex').toUpperCase();
+  if (sig !== expected) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(data, 'base64').toString());
+    if (!payload.exp || payload.exp < Date.now()) return null;
+    return payload;
+  } catch { return null; }
+}
 
-  facts.push({ is_short: true, text: { tag: 'lark_md', content: `**Pulled out**\n${d.at}` } });
-  facts.push({ is_short: true, text: { tag: 'lark_md', content: `**Released by**\n${d.by}` } });
+// ── Tenant access token, cached for the life of the warm instance ────────────
+let _tok = { value: null, exp: 0 };
 
-  // The slot is deliberately left out: whoever reads this in Lark cares what
-  // went on the truck, not which shelf it came off.
-  const rows = lines.map(l =>
-    `**${l.sku}**  ·  ${money(l.qty)} pcs${l.boxes ? ` (${money(l.boxes)} box${l.boxes === 1 ? '' : 'es'})` : ''}`
-  ).join('\n');
+async function tenantToken() {
+  if (_tok.value && Date.now() < _tok.exp) return _tok.value;
 
-  const elements = [
-    { tag: 'div', fields: facts },
-    { tag: 'hr' },
-    { tag: 'div', text: { tag: 'lark_md',
-      content: `**${lines.length} SKU${lines.length === 1 ? '' : 's'}  ·  ${money(totalPcs)} pieces**` } },
-    { tag: 'div', text: { tag: 'lark_md', content: rows || '_no lines_' } }
-  ];
-
-  if (d.note) {
-    elements.push({ tag: 'hr' });
-    elements.push({ tag: 'div', text: { tag: 'lark_md', content: `**Notes**\n${d.note}` } });
+  const appId     = process.env.LARK_APP_ID;
+  const appSecret = process.env.LARK_APP_SECRET;
+  if (!appId || !appSecret) {
+    throw new Error('LARK_APP_ID / LARK_APP_SECRET not configured — needed to upload the image');
   }
-  elements.push({ tag: 'note', elements: [
-    { tag: 'plain_text', content: `Sunbeams Impex · Warehouse · ${d.ref}` } ] });
 
+  const res = await fetch(`${LARK_API}/auth/v3/tenant_access_token/internal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_id: appId, app_secret: appSecret })
+  });
+  const json = await res.json();
+  if (json.code !== 0) throw new Error(`Lark token failed (${json.code}): ${json.msg}`);
+
+  _tok = {
+    value: json.tenant_access_token,
+    // expire is in seconds; refresh a minute early
+    exp: Date.now() + Math.max(60, (json.expire || 7200) - 60) * 1000
+  };
+  return _tok.value;
+}
+
+// ── Upload the PNG once, reuse the image_key for every chat ──────────────────
+async function uploadImage(buffer) {
+  const token = await tenantToken();
+
+  const boundary = '----sii' + crypto.randomBytes(12).toString('hex');
+  const head = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="image_type"\r\n\r\nmessage\r\n` +
+    `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="schedule.png"\r\n` +
+    `Content-Type: image/png\r\n\r\n`
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const body = Buffer.concat([head, buffer, tail]);
+
+  const res = await fetch(`${LARK_API}/im/v1/images`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'Content-Length': String(body.length)
+    },
+    body
+  });
+  const json = await res.json();
+  if (json.code !== 0) {
+    throw new Error(`Image upload failed (${json.code}): ${json.msg}`);
+  }
+  return json.data.image_key;
+}
+
+// Interactive card. The client supplies { header, elements }; the image, when
+// this chat gets one, is inserted as the first element so it sits inside the
+// card rather than arriving as a separate message.
+function buildCard(spec, imageKey) {
+  const elements = [...(spec.elements || [])];
+  if (imageKey) {
+    elements.unshift({
+      tag: 'img',
+      img_key: imageKey,
+      alt: { tag: 'plain_text', content: spec.header?.title || 'Schedule' }
+    });
+  }
   return {
     msg_type: 'interactive',
     card: {
       config: { wide_screen_mode: true },
       header: {
-        template: 'orange',
-        title: { tag: 'plain_text', content: `Pullout · ${d.truck || 'no truck'}` }
+        template: spec.header?.template || 'blue',
+        title: { tag: 'plain_text', content: spec.header?.title || 'SII Logistics' }
       },
       elements
     }
   };
 }
 
-export default async function handler(req, res) {
-  res.setHeader('Cache-Control', 'no-store, max-age=0');
-  const me = await requireUser(req, res);
-  if (!me) return;
-
-  if (req.method !== 'POST') {
-    res.setHeader('Allow', 'POST');
-    return res.status(405).json({ error: 'Use POST.' });
+// One bubble containing the image with the text underneath it.
+// Lark's "post" type takes an array of rows; each row is an array of tags.
+function buildPost(imageKey, text, title) {
+  const rows = [[{ tag: 'img', image_key: imageKey }]];
+  for (const line of String(text || '').split('\n')) {
+    // Empty text tags get dropped, so use a space to keep the blank line
+    rows.push([{ tag: 'text', text: line.length ? line : ' ' }]);
   }
-
-  const hooks = [process.env.LARK_WEBHOOK_1, process.env.LARK_WEBHOOK_2].filter(Boolean);
-  if (!hooks.length) {
-    return res.status(200).json({ sent: 0, skipped: true,
-      results: [{ ok: false, error: 'No LARK_WEBHOOK_1 set, so nothing was sent. The pullout is still saved.' }] });
-  }
-
-  try {
-    const d = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
-    const card = buildCard(d);
-
-    const results = await Promise.all(hooks.map(async (url, i) => {
-      try {
-        const r = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(card)
-        });
-        const out = await r.json().catch(() => ({}));
-        // Lark answers 200 with a non-zero code when it rejects the card.
-        const ok = r.ok && (out.code === 0 || out.StatusCode === 0 || out.code === undefined);
-        return { bot: i + 1, ok, error: ok ? null : (out.msg || out.StatusMessage || `HTTP ${r.status}`) };
-      } catch (e) {
-        return { bot: i + 1, ok: false, error: e.message };
-      }
-    }));
-
-    return res.status(200).json({ sent: results.filter(r => r.ok).length, results });
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
-  }
+  const body = { title: title || '', content: rows };
+  // Supply both locales so it renders regardless of the reader's language setting
+  return { msg_type: 'post', content: { post: { en_us: body, zh_cn: body } } };
 }
+
+async function postHook(url, payload) {
+  const res  = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const json = await res.json().catch(() => ({}));
+  // Custom bots reply {code:0} on success; some return {StatusCode:0}
+  const ok = json.code === 0 || json.StatusCode === 0 || res.ok;
+  if (!ok) throw new Error(json.msg || json.StatusMessage || `HTTP ${res.status}`);
+}
+
+// ── Handler ──────────────────────────────────────────────────────────────────
+module.exports = async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' });
+
+  const caller = verifyToken((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+  if (!caller) return res.status(401).json({ error: 'Unauthorized — please log in again' });
+  if (caller.role === 'viewer') return res.status(403).json({ error: 'Read-only access' });
+
+  // ── Setup diagnostic: reports exactly which step is broken ──
+  if (req.body && req.body.diagnose) {
+    const out = {
+      hooks: {
+        delivery: Boolean(HOOKS.delivery),
+        drivers:  Boolean(HOOKS.drivers),
+        sm:       Boolean(HOOKS.sm)
+      },
+      appId:     Boolean(process.env.LARK_APP_ID),
+      appSecret: Boolean(process.env.LARK_APP_SECRET),
+      tokenOk: false, tokenError: null,
+      uploadOk: false, uploadError: null
+    };
+    try {
+      await tenantToken();
+      out.tokenOk = true;
+    } catch (e) {
+      out.tokenError = e.message;
+      return res.json(out);
+    }
+    try {
+      // 32x32 solid PNG — verified valid; avoids any minimum-dimension check
+      const tiny = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAALElEQVR42u3NQQEAQAQAMC6RBPoX0eNK8NsKLKcrLr04JhAIBAKBQCAQCLZ8nY4BkwF7Q1gAAAAASUVORK5CYII=',
+        'base64');
+      const key = await uploadImage(tiny);
+      out.uploadOk = Boolean(key);
+    } catch (e) {
+      out.uploadError = e.message;
+    }
+    return res.json(out);
+  }
+
+  const { targets, messages, png, imageTargets } = req.body || {};
+
+  if (!Array.isArray(targets) || !targets.length) {
+    return res.status(400).json({ error: 'Pick at least one chat' });
+  }
+  if (!messages || typeof messages !== 'object') {
+    return res.status(400).json({ error: 'messages required' });
+  }
+
+  const unknown = targets.filter(t => !HOOKS[t]);
+  if (unknown.length) {
+    return res.status(400).json({
+      error: `No webhook configured for: ${unknown.join(', ')}. Set LARK_HOOK_* env vars in Vercel.`
+    });
+  }
+
+  // Which chats get the image. Defaults to delivery only; the others are text-only.
+  const wantsImage = Array.isArray(imageTargets) ? imageTargets : ['delivery'];
+  const imageNeeded = targets.some(t => wantsImage.includes(t));
+
+  // Upload only if a selected chat actually wants it. Text still sends if this fails.
+  let imageKey = null, imageError = null;
+  if (png && imageNeeded) {
+    try {
+      const b64 = String(png).replace(/^data:image\/png;base64,/, '');
+      imageKey = await uploadImage(Buffer.from(b64, 'base64'));
+    } catch (e) {
+      imageError = e.message;
+      console.error('Lark image upload:', e.message);
+    }
+  }
+
+  const fallbacks = req.body.fallbackMessages || {};
+  const titles    = req.body.titles || {};
+  const cards     = req.body.cards || {};
+
+  const sent = [], failed = [];
+  for (const t of targets) {
+    try {
+      const withImage = imageKey && wantsImage.includes(t);
+
+      // A chat expecting the image gets the short caption; if the upload failed,
+      // fall back to the detailed text so the message still says something useful.
+      let text = messages[t];
+      if (wantsImage.includes(t) && !imageKey && fallbacks[t]) text = fallbacks[t];
+
+      if (cards[t]) {
+        try {
+          await postHook(HOOKS[t], buildCard(cards[t], withImage ? imageKey : null));
+        } catch (e) {
+          // Older tenants may reject card schemas — degrade to plain text so the
+          // information still arrives rather than nothing at all
+          console.error(`card failed for ${t}, falling back:`, e.message);
+          if (text) await postHook(HOOKS[t], { msg_type: 'text', content: { text } });
+          if (withImage) await postHook(HOOKS[t], { msg_type: 'image', content: { image_key: imageKey } });
+        }
+      } else if (withImage) {
+        try {
+          await postHook(HOOKS[t], buildPost(imageKey, text, titles[t]));
+        } catch (e) {
+          console.error(`post failed for ${t}, falling back:`, e.message);
+          if (text) await postHook(HOOKS[t], { msg_type: 'text', content: { text } });
+          await postHook(HOOKS[t], { msg_type: 'image', content: { image_key: imageKey } });
+        }
+      } else if (text) {
+        await postHook(HOOKS[t], { msg_type: 'text', content: { text } });
+      }
+      sent.push(LABELS[t] || t);
+    } catch (e) {
+      console.error(`Lark send to ${t}:`, e.message);
+      failed.push(`${LABELS[t] || t} (${e.message})`);
+    }
+  }
+
+  return res.status(failed.length && !sent.length ? 502 : 200).json({
+    ok: !failed.length,
+    sent,
+    failed,
+    imageSent: Boolean(imageKey),
+    imageNeeded,
+    imageError
+  });
+};
