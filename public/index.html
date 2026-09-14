@@ -8071,8 +8071,9 @@ function renderPullout(){
           <div><label>Destination</label><input type="text" id="po-dest" value="${esc(poMeta.destination||'')}" style="width:100%"></div>
           <div><label>Date and time out</label><input type="datetime-local" id="po-at" value="${esc(poMeta.at||nowLocal())}" style="width:100%"></div>
         </div>
-        <div style="margin-top:12px"><label>Note</label>
-          <input type="text" id="po-note" value="${esc(poMeta.note||'')}" placeholder="anything worth recording" style="width:100%"></div>
+        <div style="margin-top:12px"><label>Notes</label>
+          <textarea id="po-note" rows="2" placeholder="anything the recipient should know — these go on the Lark message"
+            style="width:100%;min-height:58px;font-family:var(--sans);font-size:13.5px">${esc(poMeta.note||'')}</textarea></div>
         <div id="po-err" class="note bad hidden"></div>
         <div class="row">
           <button class="btn" id="po-release">Release and send to Lark</button>
