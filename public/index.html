@@ -513,7 +513,8 @@ async function api(path, opts = {}) {
   });
   const body = await r.json().catch(() => ({}));
   if (r.status === 401 && body.reauth) { signOut('Your session expired. Sign in again.'); throw new Error('Session expired'); }
-  if (!r.ok) throw new Error(body.error || `Request failed (${r.status})`);
+  // Keep the status in the message: "failed" on its own is not diagnosable.
+  if (!r.ok) throw new Error(`${body.error || 'Request failed'} (HTTP ${r.status})`);
   return body;
 }
 
@@ -8019,6 +8020,13 @@ function renderPullout(){
 
   $('#p-pullout').innerHTML=`
   <h2>Pullout</h2>
+  ${(()=>{const bad=(S.dispatches||[]).filter(d=>d.larkState==='failed'||(d.lark===0&&d.larkError));
+    if(!bad.length) return '';
+    const last=bad[bad.length-1];
+    return `<div class="note bad"><strong>${esc(last.ref)} was saved, but Lark did not accept it.</strong>
+      <div style="margin-top:4px;font-family:var(--mono);font-size:12px">${esc(last.larkError||'no reason given')}</div>
+      <div style="margin-top:4px">${bad.length>1?`${bad.length} pullouts are unsent. `:''}Use
+      <strong>Resend</strong> in the table below once the cause is fixed.</div></div>`;})()}
   <p class="lead">Stock leaving the warehouse. Scan each SKU, add the truck and driver, then release.
   The quantities come off the map and the whole pullout is posted to Lark.</p>
 
