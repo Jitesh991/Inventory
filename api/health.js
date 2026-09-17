@@ -17,7 +17,9 @@ export default function handler(req, res) {
     blobTokenFound: tokenVars.length > 0,
     blobTokenVariableNames: tokenVars,
     AUTH_SECRET: Boolean(process.env.AUTH_SECRET),
-    SETUP_TOKEN: Boolean(process.env.SETUP_TOKEN)
+    SETUP_TOKEN: Boolean(process.env.SETUP_TOKEN),
+    LARK_WEBHOOK_1: Boolean(process.env.LARK_WEBHOOK_1),
+    LARK_WEBHOOK_2: Boolean(process.env.LARK_WEBHOOK_2)
   };
 
   // Loaded one at a time, so the response names the exact module that fails.
@@ -34,6 +36,9 @@ export default function handler(req, res) {
     if (!env.blobTokenFound) missing.push('a Blob token (BLOB_READ_WRITE_TOKEN)');
     if (!env.AUTH_SECRET) missing.push('AUTH_SECRET');
     if (!env.SETUP_TOKEN) missing.push('SETUP_TOKEN');
+    // Not fatal — pullouts still record without Lark — so reported separately.
+    const larkNote = env.LARK_WEBHOOK_1 || env.LARK_WEBHOOK_2
+      ? null : 'No Lark webhook is set, so pullouts will record but not broadcast.';
     const broken = Object.entries(imports).filter(([, v]) => v !== 'ok').map(([k]) => k);
 
     let verdict;
@@ -55,7 +60,8 @@ export default function handler(req, res) {
       node: process.version,
       env,
       imports,
-      verdict
+      verdict,
+      lark: larkNote || 'A Lark webhook is configured.'
     });
   });
 }
