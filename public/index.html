@@ -511,10 +511,21 @@ async function api(path, opts = {}) {
     ...opts,
     headers: { 'Content-Type': 'application/json', 'x-session': SESSION, ...(opts.headers || {}) }
   });
-  const body = await r.json().catch(() => ({}));
+
+  // Read once as text. A crashed function answers with HTML or a plain string,
+  // not JSON, and json() would swallow it — which is how a real cause became
+  // the useless "Request failed".
+  const raw = await r.text().catch(() => '');
+  let body = {};
+  try { body = raw ? JSON.parse(raw) : {}; } catch { body = {}; }
+
   if (r.status === 401 && body.reauth) { signOut('Your session expired. Sign in again.'); throw new Error('Session expired'); }
-  // Keep the status in the message: "failed" on its own is not diagnosable.
-  if (!r.ok) throw new Error(`${body.error || 'Request failed'} (HTTP ${r.status})`);
+  if (!r.ok) {
+    const detail = body.error
+      || (raw ? raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300) : '')
+      || 'no detail returned';
+    throw new Error(`${detail} (HTTP ${r.status})`);
+  }
   return body;
 }
 
