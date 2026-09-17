@@ -8103,7 +8103,14 @@ function renderPullout(){
         <td>${esc(d.destination||'—')}</td>
         <td class="num">${d.lines.length}</td>
         <td class="num">${d.lines.reduce((a,l)=>a+l.qty,0).toLocaleString()}</td>
-        <td><span class="pill ${d.lark>0?'ok':'warn'}">${d.lark>0?`sent ×${d.lark}`:'not sent'}</span></td>
+        <td>
+          <span class="pill ${d.larkState==='sending'?'warn':d.lark>0?'ok':'bad'}">${
+            d.larkState==='sending' ? 'sending…' : d.lark>0 ? `sent ×${d.lark}` : 'not sent'}</span>
+          ${d.larkError?`<div style="font-size:11px;color:var(--terra);max-width:260px;white-space:normal">${
+            esc(d.larkError)}</div>`:''}
+          ${d.lark>0||d.larkState==='sending'?'':`<button class="btn quiet" data-loresend="${esc(d.ref)}"
+            style="padding:2px 8px;margin-top:4px">Resend</button>`}
+        </td>
         ${isAdmin()?`<td style="text-align:right;white-space:nowrap">
           <button class="btn ghost" data-poedit="${esc(d.ref)}" style="padding:2px 9px">Edit</button>
           <button class="btn quiet" data-podelete="${esc(d.ref)}" style="padding:2px 9px;color:var(--terra)">Delete</button>
@@ -8132,6 +8139,7 @@ function renderPullout(){
     if(!confirm('Discard this truck load?')) return;
     poLines=[]; poMeta={}; renderPullout(); });
   $('#po-csv').onclick=downloadDispatchCsv;
+  $('#p-pullout').querySelectorAll('[data-loresend]').forEach(b=>b.onclick=()=>sendToLark(b.dataset.loresend));
   $('#p-pullout').querySelectorAll('[data-poedit]').forEach(b=>b.onclick=()=>openDispatchEditor(b.dataset.poedit));
   $('#p-pullout').querySelectorAll('[data-podelete]').forEach(b=>b.onclick=()=>deleteDispatch(b.dataset.podelete));
   code.focus();
@@ -8301,23 +8309,7 @@ function releasePullout(){
   const log=$('#po-log');
   if(log){ log.classList.remove('hidden'); log.textContent=`${record.ref} released. Sending to Lark…`; }
 
-  api('/api/lark',{method:'POST',body:JSON.stringify(record)})
-    .then(out=>{
-      const rec=(S.dispatches||[]).find(d=>d.ref===record.ref);
-      if(rec){ rec.lark=out.sent||0; commit(); }
-      renderPullout();
-      const l=$('#po-log');
-      if(l){ l.classList.remove('hidden');
-        l.textContent=`${record.ref} released. `+(out.sent
-          ? `Sent to ${out.sent} Lark bot${out.sent===1?'':'s'}.`
-          : 'Not sent to Lark — '+((out.results||[]).map(r=>r.error).filter(Boolean).join('; ')||'no webhook configured')
-            +'\nThe pullout is saved either way.'); }
-    })
-    .catch(e=>{
-      const l=$('#po-log');
-      if(l){ l.classList.remove('hidden');
-        l.textContent=`${record.ref} released and saved, but Lark failed: ${e.message}`; }
-    });
+  sendToLark(record.ref);
 }
 
 /**
@@ -8477,6 +8469,42 @@ function deleteDispatch(ref){
   S.dispatches=S.dispatches.filter(x=>x!==d);
   commit(); renderPullout();
   toast(`${ref} deleted, stock returned`);
+}
+
+/**
+ * Send, or re-send, one pullout to Lark.
+ *
+ * The outcome is written onto the record rather than into a log element: the
+ * screen re-renders the moment the truck list empties, so anything printed
+ * into that block disappears before it can be read. This is why a failure
+ * used to show as a bare "not sent" with no reason.
+ */
+function sendToLark(ref){
+  const rec=(S.dispatches||[]).find(d=>d.ref===ref);
+  if(!rec) return;
+  rec.larkState='sending'; rec.larkError='';
+  renderPullout();
+
+  api('/api/lark',{method:'POST',body:JSON.stringify(rec)})
+    .then(out=>{
+      const r=(S.dispatches||[]).find(d=>d.ref===ref);
+      if(!r) return;
+      r.lark=out.sent||0;
+      r.larkState = out.sent ? 'sent' : 'failed';
+      r.larkError = out.sent ? '' :
+        ((out.results||[]).map(x=>x.error).filter(Boolean).join('; ')
+          || 'No webhook is configured on the server.');
+      commit(); renderPullout();
+      toast(out.sent ? `${ref} sent to ${out.sent} Lark bot${out.sent===1?'':'s'}`
+                     : `${ref} saved, but Lark refused it`);
+    })
+    .catch(e=>{
+      const r=(S.dispatches||[]).find(d=>d.ref===ref);
+      if(!r) return;
+      r.lark=0; r.larkState='failed'; r.larkError=e.message;
+      commit(); renderPullout();
+      toast(`${ref} saved, but Lark failed`);
+    });
 }
 
 function downloadDispatchCsv(){
