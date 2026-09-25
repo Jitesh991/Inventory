@@ -7109,14 +7109,24 @@ function catRow(l){
    it is changed with the Move button. ---- */
 let editingCat=null;
 
+/**
+ * Edit one catalog line, or add a new one.
+ *
+ * Adding reuses the edit form rather than a second near-identical one, so the
+ * two can never drift apart — a field added here is available in both.
+ */
 function openCatEditor(id){
-  const l=(S.catLines||[]).find(x=>x.id===id);
+  const adding = id === null;
+  const l = adding
+    ? { id:null, sku:'', upc:'', boxUpc:'', upcAlt:[], boxUpcAlt:[], brand:'',
+        packing:null, qty:0, imageUrl:'', loc:'' }
+    : (S.catLines||[]).find(x=>x.id===id);
   if(!l) return;
   editingCat=id;
   const host=$('#c-editor');
   host.classList.remove('hidden');
   host.innerHTML=`
-    <h3 id="ce-title">Edit ${esc(l.sku)}</h3>
+    <h3 id="ce-title">${adding?'Add a SKU':'Edit '+esc(l.sku)}</h3>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
       <div><label>SKU</label><input type="text" id="ce-sku" value="${esc(l.sku)}" style="width:100%"></div>
       <div><label>Item UPC — one piece</label>
@@ -7147,7 +7157,7 @@ function openCatEditor(id){
       <button class="btn" id="ce-save">Save</button>
       <button class="btn quiet" id="ce-cancel">Cancel</button>
       <span style="flex:1"></span>
-      <button class="btn quiet" id="ce-del" style="color:var(--terra)">Delete this line</button>
+      ${adding?'':'<button class="btn quiet" id="ce-del" style="color:var(--terra)">Delete this line</button>'}
     </div>`;
 
   const preview=()=>{
@@ -7159,7 +7169,7 @@ function openCatEditor(id){
   $('#ce-img').oninput=preview; preview();
 
   $('#ce-cancel').onclick=closeCatEditor;
-  $('#ce-del').onclick=()=>{
+  if(!adding) $('#ce-del').onclick=()=>{
     if(!confirm(`Delete the catalog line for ${l.sku}?${l.loc?' Its stock at '+l.loc+' goes too.':''}`)) return;
     removeCatPlacement(l);
     S.catLines=S.catLines.filter(x=>x.id!==id);
@@ -7167,7 +7177,36 @@ function openCatEditor(id){
   };
   $('#ce-save').onclick=()=>{
     const sku=$('#ce-sku').value.trim();
-    if(!sku){ $('#ce-err').textContent='A SKU is required.'; $('#ce-err').classList.remove('hidden'); return; }
+    const fail=t=>{ $('#ce-err').textContent=t; $('#ce-err').classList.remove('hidden'); };
+    if(!sku) return fail('A SKU is required.');
+    if(adding){
+      // A second line for the same SKU is legitimate — the same product can sit
+      // in two places — but it is nearly always a mistake when typed by hand.
+      const dupe=(S.catLines||[]).find(x=>(x.sku||'').toUpperCase()===sku.toUpperCase());
+      if(dupe && !confirm(`${sku} is already in the catalog${dupe.loc?' at '+dupe.loc:''}.\n\n`
+        +'Add a second line for it anyway? Say no to edit the existing one instead.')){
+        closeCatEditor(); openCatEditor(dupe.id); return;
+      }
+      const codes=v=>[...new Set(String(v||'').split(/[^0-9]+/).filter(x=>x.length>=6))];
+      const upc=$('#ce-upc').value.replace(/\D/g,'');
+      const boxUpc=$('#ce-boxupc').value.replace(/\D/g,'');
+      if(boxUpc&&boxUpc===upc) return fail('The item and box UPC cannot be the same.');
+      const clash=(S.catLines||[]).find(x=>[x.upc,x.boxUpc,...(x.upcAlt||[]),...(x.boxUpcAlt||[])]
+        .filter(Boolean).some(c=>c===upc||c===boxUpc));
+      if(clash&&(upc||boxUpc)) return fail(`That barcode is already on ${clash.sku}.`);
+      const img=$('#ce-img').value.trim();
+      if(img&&!/^https?:\/\//i.test(img)) return fail('The image URL must start with http:// or https://');
+      const brand=$('#ce-brand').value.trim().toUpperCase();
+      if(brand&&!brandOf(brand)) S.brands.push({name:brand,color:FALLBACK[S.brands.length%FALLBACK.length]});
+      S.catLines=[...(S.catLines||[]), { id:newCatId(), sku, upc, boxUpc,
+        upcAlt:codes($('#ce-upcalt').value).filter(c=>c!==upc),
+        boxUpcAlt:codes($('#ce-boxupcalt').value).filter(c=>c!==boxUpc),
+        brand, packing:num($('#ce-packing').value), qty:num($('#ce-qty').value)||0,
+        imageUrl:img, loc:'' }];
+      closeCatEditor(); commit(); catQuery=sku; renderCatalog();
+      toast(`${sku} added`);
+      return;
+    }
     const img=$('#ce-img').value.trim();
     if(img&&!/^https?:\/\//i.test(img)){
       $('#ce-err').textContent='The image URL must start with http:// or https://';
@@ -7272,9 +7311,13 @@ function renderCatalog(){
   </div>
 
   <div class="card">
-    <h3>Search</h3>
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Search</h3>
+      <span style="flex:1"></span>
+      <button class="btn" id="c-add" style="padding:5px 12px;font-size:12.5px">+ Add a SKU</button>
+    </div>
     <input type="text" id="c-search" placeholder="SKU, UPC or brand" value="${esc(catQuery)}"
-      style="width:100%;font-family:var(--mono);font-size:14px;margin-bottom:12px">
+      style="width:100%;font-family:var(--mono);font-size:14px;margin:12px 0">
     <div id="c-editor" class="card hidden" style="border-color:var(--king);margin-bottom:14px"></div>
     <div id="c-results"></div>
   </div>
@@ -7338,6 +7381,7 @@ function renderCatalog(){
     toast('Catalog CSV downloaded');
   };
 
+  $('#c-add').onclick=()=>openCatEditor(null);
   $('#c-search').oninput=e=>{ catQuery=e.target.value; renderCatalogResults(); };
   renderCatalogResults();
 }
@@ -7373,8 +7417,17 @@ function renderCatalogResults(){
     ? `<table><thead><tr><th style="width:44px"></th><th>SKU</th><th>Barcodes</th><th>Brand</th><th class="num">Pack</th><th class="num">Qty</th><th>Location</th><th></th></tr></thead>
        <tbody>${filtered.slice(0,300).map(catRow).join('')}</tbody></table>
        ${filtered.length>300?`<p class="mini" style="color:var(--ink-2);margin-top:8px">Showing the first 300 of ${filtered.length} matches — narrow the search.</p>`:''}`
-    : (lines.length?'<p class="lead" style="margin:0">No matches.</p>':'<p class="lead" style="margin:0">Import your list above to search it.</p>'));
+    : (lines.length
+        ? `<p class="lead" style="margin:0">No matches for “${esc(catQuery)}”.
+           <button class="btn quiet" id="c-addhere" style="padding:2px 9px;margin-left:6px">Add it</button></p>`
+        : '<p class="lead" style="margin:0">Import your list above, or add a SKU by hand.</p>'));
 
+  const addHere=$('#c-addhere');
+  if(addHere) addHere.onclick=()=>{
+    openCatEditor(null);
+    // Carry the search text across — it is nearly always the SKU being added.
+    const f=$('#ce-sku'); if(f){ f.value=catQuery.trim(); f.focus(); }
+  };
   container.querySelectorAll('[data-cedit]').forEach(b=>b.onclick=()=>openCatEditor(b.dataset.cedit));
   container.querySelectorAll('[data-place]').forEach(b=>b.onclick=()=>startPlace(b.dataset.place));
   container.querySelectorAll('[data-unplace]').forEach(b=>b.onclick=()=>unplaceCatLine(b.dataset.unplace));
