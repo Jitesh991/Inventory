@@ -8165,8 +8165,7 @@ function renderPullout(){
     </div>
     ${history.length?`<div class="scroll cap" style="margin-top:12px"><table>
       <thead><tr><th>Reference</th><th>Out</th><th>Truck</th><th>Driver</th><th>Destination</th>
-        <th class="num">SKUs</th><th class="num">Pieces</th><th>Lark</th>${
-        isAdmin()?'<th></th>':''}</tr></thead>
+        <th class="num">SKUs</th><th class="num">Pieces</th><th>Lark</th><th></th></tr></thead>
       <tbody>${history.map(d=>`<tr>
         <td class="mono">${esc(d.ref)}</td>
         <td class="mono" style="font-size:11.5px">${esc(d.at)}</td>
@@ -8183,10 +8182,12 @@ function renderPullout(){
           ${d.lark>0||d.larkState==='sending'?'':`<button class="btn quiet" data-loresend="${esc(d.ref)}"
             style="padding:2px 8px;margin-top:4px">Resend</button>`}
         </td>
-        ${isAdmin()?`<td style="text-align:right;white-space:nowrap">
-          <button class="btn ghost" data-poedit="${esc(d.ref)}" style="padding:2px 9px">Edit</button>
-          <button class="btn quiet" data-podelete="${esc(d.ref)}" style="padding:2px 9px;color:var(--terra)">Delete</button>
-        </td>`:''}
+        <td style="text-align:right;white-space:nowrap">
+          <button class="btn ghost" data-poview="${esc(d.ref)}" style="padding:2px 9px">View</button>
+          <button class="btn quiet" data-pocsv="${esc(d.ref)}" style="padding:2px 9px">CSV</button>
+          ${isAdmin()?`<button class="btn quiet" data-poedit="${esc(d.ref)}" style="padding:2px 9px">Edit</button>
+          <button class="btn quiet" data-podelete="${esc(d.ref)}" style="padding:2px 9px;color:var(--terra)">Delete</button>`:''}
+        </td>
       </tr>`).join('')}</tbody></table></div>`
       :'<p class="lead" style="margin:10px 0 0">No pullouts yet.</p>'}
   </div>`;
@@ -8212,6 +8213,8 @@ function renderPullout(){
     poLines=[]; poMeta={}; renderPullout(); });
   $('#po-csv').onclick=downloadDispatchCsv;
   $('#p-pullout').querySelectorAll('[data-loresend]').forEach(b=>b.onclick=()=>sendToLark(b.dataset.loresend));
+  $('#p-pullout').querySelectorAll('[data-poview]').forEach(b=>b.onclick=()=>viewDispatch(b.dataset.poview));
+  $('#p-pullout').querySelectorAll('[data-pocsv]').forEach(b=>b.onclick=()=>downloadOneDispatch(b.dataset.pocsv));
   $('#p-pullout').querySelectorAll('[data-poedit]').forEach(b=>b.onclick=()=>openDispatchEditor(b.dataset.poedit));
   $('#p-pullout').querySelectorAll('[data-podelete]').forEach(b=>b.onclick=()=>deleteDispatch(b.dataset.podelete));
   code.focus();
@@ -8423,6 +8426,79 @@ function tidySlot(loc){
   if(!S.inv[loc]) return;
   S.inv[loc]=S.inv[loc].filter(x=>(+x.qty||0)!==0);
   if(!S.inv[loc].length) delete S.inv[loc];
+}
+
+/**
+ * The pullout as a document: what left, on which truck, with whom.
+ *
+ * Open to everyone including scanners — a picker needs to check what they
+ * loaded without being able to alter it afterwards. Nothing here writes.
+ */
+function viewDispatch(ref){
+  const d=(S.dispatches||[]).find(x=>x.ref===ref);
+  if(!d) return;
+  const host=$('#po-editor');
+  host.classList.remove('hidden');
+  const pcs=d.lines.reduce((a,l)=>a+l.qty,0);
+  const boxes=d.lines.reduce((a,l)=>a+(+l.boxes||0),0);
+
+  host.innerHTML=`
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">${esc(d.ref)}</h3>
+      <span class="pill ${d.lark>0?'ok':'bad'}">${d.lark>0?`sent to Lark ×${d.lark}`:'not sent to Lark'}</span>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="dv-csv">Download CSV</button>
+      <button class="btn quiet" id="dv-close">Close</button>
+    </div>
+
+    <div class="stats" style="margin:14px 0 4px">
+      <div><span>Truck</span><strong style="font-size:15px">${esc(d.truck||'—')}</strong></div>
+      <div><span>Driver</span><strong style="font-size:15px">${esc(d.driver||'—')}</strong></div>
+      <div><span>Destination</span><strong style="font-size:15px">${esc(d.destination||'—')}</strong></div>
+      <div><span>Out</span><strong style="font-size:15px">${esc(d.at||'—')}</strong></div>
+      <div><span>Released by</span><strong style="font-size:15px">${esc(d.by||'—')}</strong></div>
+    </div>
+    ${d.note?`<div class="note"><strong>Notes</strong><br>${esc(d.note)}</div>`:''}
+    ${d.editedBy?`<div class="note warn">Edited by ${esc(d.editedBy)} on ${esc(d.editedAt||'')} —
+      this no longer matches the message that went to Lark.</div>`:''}
+
+    <div class="scroll cap" style="margin-top:12px"><table>
+      <thead><tr><th>Slot</th><th>SKU</th><th>Brand</th><th class="num">Boxes</th>
+        <th class="num">Pieces</th></tr></thead>
+      <tbody>${d.lines.map(l=>`<tr>
+        <td class="mono">${esc(l.loc)}</td>
+        <td class="mono">${esc(l.sku)}</td>
+        <td>${l.brand?`<span class="dot" style="background:${colorOf(l.brand)}"></span>${esc(l.brand)}`:'—'}</td>
+        <td class="num">${l.boxes!=null?(+l.boxes).toLocaleString():'—'}</td>
+        <td class="num">${(+l.qty||0).toLocaleString()}</td></tr>`).join('')}
+      </tbody>
+      <tfoot><tr style="background:var(--porcelain)">
+        <td colspan="3" style="font-weight:600">${d.lines.length} line${d.lines.length===1?'':'s'}</td>
+        <td class="num" style="font-weight:600">${boxes?boxes.toLocaleString():'—'}</td>
+        <td class="num" style="font-weight:600">${pcs.toLocaleString()}</td></tr></tfoot></table></div>`;
+
+  $('#dv-close').onclick=()=>{ host.classList.add('hidden'); host.innerHTML=''; };
+  $('#dv-csv').onclick=()=>downloadOneDispatch(ref);
+  host.scrollIntoView?.({block:'nearest'});
+}
+
+/** One pullout as its own CSV, named after the reference. */
+function downloadOneDispatch(ref){
+  const d=(S.dispatches||[]).find(x=>x.ref===ref);
+  if(!d) return;
+  const rows=[
+    ['Reference',d.ref],['Date out',d.at||''],['Truck',d.truck||''],['Driver',d.driver||''],
+    ['Destination',d.destination||''],['Released by',d.by||''],['Notes',d.note||''],
+    [],
+    ['Slot','SKU','Brand','Boxes','Pieces']
+  ];
+  d.lines.forEach(l=>rows.push([l.loc,l.sku,l.brand||'',l.boxes??'',l.qty]));
+  rows.push([]);
+  rows.push(['','','Total',d.lines.reduce((a,l)=>a+(+l.boxes||0),0),
+    d.lines.reduce((a,l)=>a+l.qty,0)]);
+  const csv=rows.map(r=>r.map(v=>/[",\n]/.test(String(v))?`"${String(v).replace(/"/g,'""')}"`:v).join(',')).join('\n');
+  download(`${d.ref}.csv`,csv,'text/csv');
+  toast(`${d.ref}.csv downloaded`);
 }
 
 function openDispatchEditor(ref){
