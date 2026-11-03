@@ -172,7 +172,6 @@ body.scanner #mapbar .mb-group:nth-child(2),
 body.scanner #addbrand,
 body.scanner #recolor,
 body.scanner #reset,
-body.scanner #locktoggle,
 body.scanner #loadsheets,
 body.scanner #loadold,
 body.scanner .chip .del{display:none!important}
@@ -7246,31 +7245,85 @@ function closeCatEditor(){
   if(h){ h.classList.add('hidden'); h.innerHTML=''; }
 }
 
+/**
+ * Place a catalog line on the map.
+ *
+ * Rack and slot are chosen from dropdowns rather than typed — a mistyped code
+ * silently created a slot that did not exist. Quantity is optional: recording
+ * where something lives is useful on its own, and the count usually arrives
+ * later from a scan or a stock take.
+ */
 function startPlace(id){
   const line=(S.catLines||[]).find(x=>x.id===id); if(!line) return;
-  const raw=prompt(`Location for ${line.sku}${line.brand?' — '+line.brand:''}`, line.loc||'');
-  if(raw===null) return;
-  const code=raw.toUpperCase().replace(/\s+/g,'');
-  const m=code.match(/^([A-Z]{1,3})(\d+)\.(\d+)$/);
-  if(!m){ toast('Location should look like A4.1 or LCA1.1'); return; }
-  const rk=m[1];
-  if(isLocked(rk)){ toast(`${rackName(rk)} is locked`); return; }
-  const qtyRaw=prompt(`Quantity at ${code}`, String(line.qty||''));
-  if(qtyRaw===null) return;
-  const qty=num(qtyRaw);
-  if(qty==null){ toast('Enter a number for quantity'); return; }
+  const host=$('#c-editor');
+  host.classList.remove('hidden');
 
-  if(line.loc) removeCatPlacement(line);
-  const bay=m[2], layer=+m[3];
-  if(!S.racks[rk]) S.racks[rk]={};
-  const arr=S.racks[rk][bay]||[];
-  if(!arr.includes(layer)) S.racks[rk][bay]=[...arr,layer].sort((a,b)=>a-b);
-  S.inv[code]=S.inv[code]||[];
-  const boxes=line.packing?+(qty/line.packing).toFixed(2):null;
-  S.inv[code].push({sku:line.sku,boxes,packing:line.packing,qty,_catId:line.id});
-  line.loc=code;
-  commit(); renderCatalogResults();
-  toast(`${line.sku} placed at ${code}`);
+  const racks=Object.keys(S.racks).sort(sortRacks);
+  const current=line.loc||'';
+  const curRack=(current.match(/^[A-Z]{1,3}/)||[''])[0];
+  let pickRack = racks.includes(curRack) ? curRack : (racks[0]||'');
+
+  const draw=()=>{
+    host.innerHTML=`
+      <h3>${current?'Move':'Place'} ${esc(line.sku)}${line.brand?` <span style="font-weight:400;color:var(--ink-2)">${esc(line.brand)}</span>`:''}</h3>
+      ${current?`<p class="lead" style="margin:0 0 12px">Currently at <span class="mono">${esc(current)}</span>.</p>`:''}
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px">
+        <div><label>Rack</label><select id="pl-rack" style="width:100%">${
+          racks.map(r=>`<option value="${esc(r)}" ${r===pickRack?'selected':''}>${
+            esc(isFloor(r)?rackName(r):'Rack '+r)}</option>`).join('')}</select></div>
+        <div><label>Slot</label><select id="pl-slot" style="width:100%"></select></div>
+        <div><label>Quantity <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--ink-3)">— optional</span></label>
+          <input type="number" id="pl-qty" min="0" step="1" value="${line.qty||''}"
+            placeholder="leave blank if unknown" style="width:100%"></div>
+      </div>
+      <div id="pl-err" class="note bad hidden"></div>
+      <div class="row">
+        <button class="btn" id="pl-go">${current?'Move it':'Place it'}</button>
+        <button class="btn quiet" id="pl-cancel">Cancel</button>
+      </div>`;
+
+    const drawSlots=()=>{
+      const sel=$('#pl-slot'); const r=$('#pl-rack').value;
+      const out=[];
+      Object.keys(S.racks[r]||{}).map(Number).sort((a,b)=>a-b).forEach(bay=>{
+        S.racks[r][bay].slice().sort((a,b)=>a-b).forEach(l=>{
+          const loc=`${r}${bay}.${l}`;
+          const brands=(S.assign[loc]||[]).join(' & ');
+          const pcs=qtyOf(loc);
+          out.push(`<option value="${esc(loc)}" ${loc===current?'selected':''}>${esc(loc)}${
+            brands?' — '+esc(brands):''}${pcs?` · ${pcs.toLocaleString()} pcs`:''}</option>`);
+        });
+      });
+      sel.innerHTML=out.length?out.join(''):'<option value="">no slots in this rack</option>';
+    };
+    drawSlots();
+    $('#pl-rack').onchange=e=>{ pickRack=e.target.value; drawSlots(); };
+    $('#pl-cancel').onclick=closeCatEditor;
+    $('#pl-go').onclick=()=>{
+      const code=$('#pl-slot').value;
+      const err=$('#pl-err');
+      const fail=t=>{ err.textContent=t; err.classList.remove('hidden'); };
+      if(!code) return fail('Pick a slot.');
+      const rk=(code.match(/^[A-Z]{1,3}/)||[''])[0];
+      if(isLocked(rk)) return fail(`${rackName(rk)} is locked. Unlock it on the map first.`);
+
+      const raw=$('#pl-qty').value.trim();
+      const qty = raw==='' ? 0 : num(raw);
+      if(qty===null) return fail('Quantity must be a number, or leave it blank.');
+
+      if(line.loc) removeCatPlacement(line);
+      S.inv[code]=S.inv[code]||[];
+      const boxes = (qty && line.packing) ? +(qty/line.packing).toFixed(2) : null;
+      S.inv[code].push({sku:line.sku,boxes,packing:line.packing,qty,_catId:line.id});
+      line.loc=code;
+      closeCatEditor(); commit(); renderCatalogResults();
+      toast(raw===''
+        ? `${line.sku} placed at ${code} — no quantity recorded yet`
+        : `${line.sku} placed at ${code}`);
+    };
+    host.scrollIntoView?.({block:'nearest'});
+  };
+  draw();
 }
 function unplaceCatLine(id){
   const line=(S.catLines||[]).find(x=>x.id===id); if(!line) return;
