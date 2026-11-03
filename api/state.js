@@ -15,8 +15,15 @@ import { requireUser, isAdmin, readBlob, writeBlob } from './_auth.js';
 
 const PATH = 'warehouse/state.json';
 
-/** Only an administrator may change these. */
-const STRUCTURAL = ['racks', 'assign', 'brands', 'locks', 'kinds', 'labels'];
+/**
+ * Only an administrator may change these.
+ *
+ * Locks are deliberately NOT here. A lock guards the rack layout from stray
+ * clicks, and painting is already refused for scanners, so a scanner toggling
+ * one changes nothing structural — but reverting it server-side meant their
+ * unlock silently re-locked itself on the next save, which blocked scanning.
+ */
+const STRUCTURAL = ['racks', 'assign', 'brands', 'kinds', 'labels'];
 
 async function readState() {
   const state = await readBlob(PATH);
