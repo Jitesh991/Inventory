@@ -6494,23 +6494,40 @@ function catInfo(sku){
    Inventory tab's Remove button, clearing a slot's brand, deleting
    a rack), drop the stale location off the line rather than keep
    claiming a spot it no longer holds. */
+/**
+ * Every slot this catalog line is placed in.
+ *
+ * Read from the stock record rather than held on the line, because a line can
+ * sit in several slots at once and two copies of that fact would drift. The
+ * old single `loc` is kept in step for anything still reading it.
+ */
+function catPlaces(line){
+  const out=[];
+  Object.keys(S.inv||{}).forEach(loc=>{
+    (S.inv[loc]||[]).forEach(x=>{ if(x._catId===line.id)
+      out.push({loc, qty:+x.qty||0, boxes:x.boxes}); });
+  });
+  return out.sort((a,b)=>sortLoc(a.loc,b.loc));
+}
+
 function reconcileCatalog(){
   (S.catLines||[]).forEach(l=>{
-    if(l.loc){
-      const arr=S.inv[l.loc];
-      if(!arr||!arr.some(x=>x._catId===l.id)) l.loc='';
-    }
+    const places=catPlaces(l);
+    l.loc = places.length ? places[0].loc : '';
   });
 }
-function removeCatPlacement(line){
-  if(!line.loc) return;
-  const arr=S.inv[line.loc];
-  if(arr){
+/** Lift this line out of one slot, or out of every slot when none is named. */
+function removeCatPlacement(line, only){
+  const targets = only ? [only] : catPlaces(line).map(p=>p.loc);
+  targets.forEach(loc=>{
+    const arr=S.inv[loc];
+    if(!arr) return;
     const idx=arr.findIndex(x=>x._catId===line.id);
     if(idx>-1) arr.splice(idx,1);
-    if(!arr.length) delete S.inv[line.loc];
-  }
-  line.loc='';
+    if(!arr.length) delete S.inv[loc];
+  });
+  const left=catPlaces(line);
+  line.loc = left.length ? left[0].loc : '';
 }
 /* ------------------------------------------------------------------
    Bulk upload, built the way Reorder's importer works: read every sheet
@@ -7076,7 +7093,7 @@ const assignImporter = makeImporter({
 });
 
 function catRow(l){
-  const loc=l.loc;
+  const places=catPlaces(l);
   const thumb = l.imageUrl
     ? `<img src="${esc(l.imageUrl)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'"
         style="width:34px;height:34px;object-fit:contain;border-radius:5px;background:#fff;border:1px solid var(--line)">`
@@ -7094,12 +7111,21 @@ function catRow(l){
     <td>${l.brand?`<span class="dot" style="background:${colorOf(l.brand)}"></span>${esc(l.brand)}`:'—'}</td>
     <td class="num">${l.packing!=null?l.packing:'—'}</td>
     <td class="num">${(+l.qty||0).toLocaleString()}</td>
-    <td style="font-family:var(--mono)">${loc?esc(loc):'<span style="color:var(--ink-2)">unplaced</span>'}</td>
+    <td style="font-family:var(--mono);font-size:12px;line-height:1.5">
+      ${places.length
+        ? places.map(p=>`<div style="display:flex;align-items:center;gap:6px;white-space:nowrap">
+            <span>${esc(p.loc)}</span>
+            <span style="color:var(--ink-3)">${p.qty?p.qty.toLocaleString()+' pcs':'—'}</span>
+            <button class="btn quiet" data-moveone="${l.id}|${esc(p.loc)}"
+              style="padding:0 5px;font-size:10px">move</button>
+            <button class="btn quiet" data-unplace="${l.id}|${esc(p.loc)}"
+              style="padding:0 5px;font-size:10px;color:var(--terra)">×</button>
+          </div>`).join('')
+        : '<span style="color:var(--ink-2)">unplaced</span>'}
+    </td>
     <td style="text-align:right;white-space:nowrap">
       <button class="btn ghost" data-cedit="${l.id}" style="padding:2px 8px">Edit</button>
-      ${loc?`<button class="btn quiet" data-place="${l.id}" style="padding:2px 8px">Move</button>
-             <button class="btn quiet" data-unplace="${l.id}" style="padding:2px 8px">Remove</button>`
-           :`<button class="btn quiet" data-place="${l.id}" style="padding:2px 8px">+ Location</button>`}
+      <button class="btn quiet" data-place="${l.id}" style="padding:2px 8px">+ Location</button>
     </td></tr>`;
 }
 
@@ -7142,7 +7168,8 @@ function openCatEditor(id){
         <datalist id="ce-brands">${S.brands.map(b=>`<option value="${esc(b.name)}">`).join('')}</datalist></div>
       <div><label>Packing (pcs per carton)</label><input type="number" id="ce-packing" min="1" value="${l.packing??''}" style="width:100%"></div>
       <div><label>Qty</label><input type="number" id="ce-qty" min="0" value="${+l.qty||0}" style="width:100%"></div>
-      <div><label>Location</label><input type="text" value="${esc(l.loc||'unplaced')}" readonly
+      <div><label>Locations</label><input type="text" readonly
+        value="${esc(catPlaces(l).map(p=>`${p.loc}${p.qty?` (${p.qty})`:''}`).join(', ')||'unplaced')}"
         style="width:100%;background:var(--porcelain);color:var(--ink-2)"></div>
     </div>
     <div style="margin-top:14px;display:grid;grid-template-columns:1fr 104px;gap:14px;align-items:end">
@@ -7169,7 +7196,9 @@ function openCatEditor(id){
 
   $('#ce-cancel').onclick=closeCatEditor;
   if(!adding) $('#ce-del').onclick=()=>{
-    if(!confirm(`Delete the catalog line for ${l.sku}?${l.loc?' Its stock at '+l.loc+' goes too.':''}`)) return;
+    const ps=catPlaces(l);
+    if(!confirm(`Delete the catalog line for ${l.sku}?${
+      ps.length?` Its stock at ${ps.map(p=>p.loc).join(', ')} goes too.`:''}`)) return;
     removeCatPlacement(l);
     S.catLines=S.catLines.filter(x=>x.id!==id);
     closeCatEditor(); commit(); renderCatalogResults(); toast('Line deleted');
@@ -7230,11 +7259,15 @@ function openCatEditor(id){
     l.imageUrl=img;
     // Stock already placed from this line follows the edit, so the map and the
     // catalog cannot drift apart.
-    if(l.loc&&S.inv[l.loc]){
-      const line=S.inv[l.loc].find(x=>x._catId===l.id);
-      if(line){ line.sku=l.sku; line.packing=l.packing; line.qty=l.qty;
-        line.boxes=l.packing?+(l.qty/l.packing).toFixed(2):null; }
-    }
+    // Every slot holding this line follows the edit — SKU and packing are
+    // properties of the product, so one slot keeping the old values would be
+    // a silent inconsistency.
+    catPlaces(l).forEach(p=>{
+      const inv=(S.inv[p.loc]||[]).find(x=>x._catId===l.id);
+      if(!inv) return;
+      inv.sku=l.sku; inv.packing=l.packing;
+      inv.boxes = l.packing && inv.qty ? +(inv.qty/l.packing).toFixed(2) : null;
+    });
     closeCatEditor(); commit(); renderCatalogResults(); toast(`${l.sku} saved`);
   };
   host?.scrollIntoView?.({block:'nearest'});
@@ -7253,20 +7286,26 @@ function closeCatEditor(){
  * where something lives is useful on its own, and the count usually arrives
  * later from a scan or a stock take.
  */
-function startPlace(id){
+function startPlace(id, moveFrom){
   const line=(S.catLines||[]).find(x=>x.id===id); if(!line) return;
   const host=$('#c-editor');
   host.classList.remove('hidden');
 
   const racks=Object.keys(S.racks).sort(sortRacks);
-  const current=line.loc||'';
+  // Naming a slot means move that one. Otherwise this adds another, because a
+  // SKU can sit in as many places as the warehouse puts it.
+  const current = moveFrom || '';
+  const existing = catPlaces(line);
   const curRack=(current.match(/^[A-Z]{1,3}/)||[''])[0];
   let pickRack = racks.includes(curRack) ? curRack : (racks[0]||'');
 
   const draw=()=>{
     host.innerHTML=`
-      <h3>${current?'Move':'Place'} ${esc(line.sku)}${line.brand?` <span style="font-weight:400;color:var(--ink-2)">${esc(line.brand)}</span>`:''}</h3>
-      ${current?`<p class="lead" style="margin:0 0 12px">Currently at <span class="mono">${esc(current)}</span>.</p>`:''}
+      <h3>${current?'Move from '+esc(current):'Add a location for '+esc(line.sku)}${
+        line.brand?` <span style="font-weight:400;color:var(--ink-2)">${esc(line.brand)}</span>`:''}</h3>
+      ${existing.length?`<p class="lead" style="margin:0 0 12px">${
+        current ? `Also at ${existing.filter(p=>p.loc!==current).map(p=>p.loc).join(', ')||'nowhere else'}.`
+                : `Already at ${existing.map(p=>`${p.loc} (${p.qty.toLocaleString()})`).join(', ')}. This adds another.`}</p>`:''}
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px">
         <div><label>Rack</label><select id="pl-rack" style="width:100%">${
           racks.map(r=>`<option value="${esc(r)}" ${r===pickRack?'selected':''}>${
@@ -7311,11 +7350,15 @@ function startPlace(id){
       const qty = raw==='' ? 0 : num(raw);
       if(qty===null) return fail('Quantity must be a number, or leave it blank.');
 
-      if(line.loc) removeCatPlacement(line);
+      // Moving lifts it out of the old slot; adding leaves the others alone.
+      if(current) removeCatPlacement(line, current);
+      if(catPlaces(line).some(p=>p.loc===code)){
+        return fail(`${line.sku} is already recorded at ${code}. Edit that line's quantity instead.`);
+      }
       S.inv[code]=S.inv[code]||[];
       const boxes = (qty && line.packing) ? +(qty/line.packing).toFixed(2) : null;
       S.inv[code].push({sku:line.sku,boxes,packing:line.packing,qty,_catId:line.id});
-      line.loc=code;
+      line.loc=catPlaces(line)[0]?.loc||code;
       closeCatEditor(); commit(); renderCatalogResults();
       toast(raw===''
         ? `${line.sku} placed at ${code} — no quantity recorded yet`
@@ -7325,12 +7368,11 @@ function startPlace(id){
   };
   draw();
 }
-function unplaceCatLine(id){
+function unplaceCatLine(id, loc){
   const line=(S.catLines||[]).find(x=>x.id===id); if(!line) return;
-  const loc=line.loc;
-  removeCatPlacement(line);
+  removeCatPlacement(line, loc);
   commit(); renderCatalogResults();
-  toast(`${line.sku} removed from ${loc}`);
+  toast(loc?`${line.sku} removed from ${loc}`:`${line.sku} unplaced`);
 }
 function renderCatalog(){
   const lines=S.catLines||[];
@@ -7481,9 +7523,14 @@ function renderCatalogResults(){
     // Carry the search text across — it is nearly always the SKU being added.
     const f=$('#ce-sku'); if(f){ f.value=catQuery.trim(); f.focus(); }
   };
+  container.querySelectorAll('[data-moveone]').forEach(b=>b.onclick=()=>{
+    const [id,loc]=b.dataset.moveone.split('|'); startPlace(id,loc);
+  });
   container.querySelectorAll('[data-cedit]').forEach(b=>b.onclick=()=>openCatEditor(b.dataset.cedit));
   container.querySelectorAll('[data-place]').forEach(b=>b.onclick=()=>startPlace(b.dataset.place));
-  container.querySelectorAll('[data-unplace]').forEach(b=>b.onclick=()=>unplaceCatLine(b.dataset.unplace));
+  container.querySelectorAll('[data-unplace]').forEach(b=>b.onclick=()=>{
+    const [id,loc]=b.dataset.unplace.split('|'); unplaceCatLine(id,loc);
+  });
 }
 
 /* ============================================================
