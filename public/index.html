@@ -65,16 +65,22 @@ button{cursor:pointer}
 .railnav button.on .dot{opacity:1}
 
 /* Map controls: horizontal, and only while the map is open. */
-.mapbar{display:flex;align-items:center;gap:18px;padding:9px 20px;background:var(--card);
-  border-bottom:1px solid var(--line);overflow-x:auto;flex:0 0 auto}
+.mapbar{background:var(--card);border-bottom:1px solid var(--line);flex:0 0 auto;
+  padding:8px 20px;display:flex;flex-direction:column;gap:7px}
 .mapbar.hidden{display:none}
-.mb-group{display:flex;align-items:center;gap:8px;flex:0 0 auto}
-.mb-group.mb-grow{flex:1 1 auto;min-width:0}
+/* Rows wrap instead of scrolling: 22 brands in a 1.5-chip-wide scroller was
+   unusable, and the vertical space costs nothing next to a tall map. */
+.mb-row{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;min-width:0}
+.mb-row.hidden{display:none}
 .mb-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);
-  font-weight:600;white-space:nowrap}
+  font-weight:600;white-space:nowrap;flex:0 0 auto}
 .mb-check{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--ink-2);white-space:nowrap}
-.palette-h{display:flex;gap:5px;overflow-x:auto;padding:2px;min-width:0}
-.rackfilter-h{display:flex;gap:4px;overflow-x:auto;max-width:280px;padding:2px}
+.palette-h{display:flex;gap:5px;flex-wrap:wrap;min-width:0;flex:1 1 auto}
+.rackfilter-h{display:flex;gap:4px;flex-wrap:wrap;flex:1 1 auto}
+.mb-doing{font-size:12px;color:var(--ink-2);white-space:nowrap}
+.mb-doing b{color:var(--ink);font-weight:600}
+.mb-doing .sw{display:inline-block;width:9px;height:9px;border-radius:2px;
+  vertical-align:-1px;margin-right:4px;border:1px solid rgba(0,0,0,.18)}
 .brandrow{display:flex;align-items:center;gap:10px}
 .brandlogo{height:34px;width:auto;max-width:150px;object-fit:contain;display:block}
 .brandtile{width:34px;height:34px;flex:0 0 34px;border-radius:9px;background:rgba(255,255,255,.16);
@@ -181,7 +187,12 @@ body.scanner .cell{cursor:default}
 
 /* ---------- canvas ---------- */
 .canvas{flex:1;overflow:auto;padding:18px 18px 90px}
-.rack{margin-bottom:22px;background:var(--floor-2);border:1px solid var(--line-hard);border-radius:4px;overflow:hidden}
+.rack{margin-bottom:22px;background:var(--floor-2);border:1px solid var(--line-hard);
+  border-radius:4px;overflow:hidden;transition:box-shadow .12s,border-color .12s}
+/* The rack being worked in, so a click never lands somewhere unnoticed. */
+.rack.editing{border-color:var(--king);box-shadow:0 0 0 2px var(--king-soft)}
+.rack.editing .rackhead{background:var(--king-soft)}
+.rack.editing .rackhead .rid{color:var(--king-deep)}
 .rackhead{display:flex;align-items:center;gap:10px;padding:7px 11px;background:#dedbd3;border-bottom:1px solid var(--line-hard)}
 .rackhead .rid{font-family:var(--mono);font-weight:700;font-size:13px;letter-spacing:.04em}
 .rackhead .meta{font-family:var(--mono);font-size:11px;color:var(--ink-2)}
@@ -446,26 +457,31 @@ tbody tr:hover td{background:#faf7f4}
       <input class="find" id="find" placeholder="find A12.4 / NEST">
     </div>
     <div class="mapbar" id="mapbar">
-      <div class="mb-group">
+      <div class="mb-row">
         <span class="mb-label">Tool</span>
         <div class="tool">
           <button data-mode="paint" class="on">Paint</button>
           <button data-mode="erase">Erase</button>
           <button data-mode="structure">Slots</button>
         </div>
-      </div>
-      <div class="mb-group">
         <label class="mb-check"><input type="checkbox" id="addmode"> Add, don't replace</label>
         <label class="mb-check"><input type="checkbox" id="qtytoggle" checked> Show quantities</label>
+        <span style="flex:1"></span>
+        <!-- What the next click will do, spelled out, so nobody has to infer
+             it from which button looks pressed. -->
+        <span class="mb-doing" id="mb-doing"></span>
+        <button class="btn quiet" id="rackstoggle" style="padding:4px 10px;font-size:12px">Racks</button>
       </div>
-      <div class="mb-group mb-grow">
+
+      <div class="mb-row">
         <span class="mb-label">Brands <span id="brandcount"></span></span>
         <div id="palette" class="palette-h"></div>
         <button class="btn quiet" id="addbrand" style="padding:4px 10px;font-size:12px">+ Brand</button>
         <button class="btn quiet" id="recolor" style="padding:4px 10px;font-size:12px">Colours</button>
       </div>
-      <div class="mb-group">
-        <span class="mb-label">Racks</span>
+
+      <div class="mb-row hidden" id="rackrow">
+        <span class="mb-label">Show</span>
         <div id="rackfilter" class="rackfilter-h"></div>
       </div>
     </div>
@@ -5716,9 +5732,28 @@ function renderRail(){
     rf.append(btn);
   });
 }
+/** The rack last worked in — highlighted so it is obvious what is being edited. */
+let activeRack='';
+
+function setActiveRack(r){
+  if(activeRack===r) return;
+  activeRack=r;
+  document.querySelectorAll('.rack').forEach(el=>
+    el.classList.toggle('editing', el.dataset.rack===activeRack));
+  syncTool();
+}
+
 function syncTool(){
   document.querySelectorAll('.tool button').forEach(b=>b.classList.toggle('on',b.dataset.mode===mode));
   document.body.classList.toggle('structure',mode==='structure');
+  const el=document.getElementById('mb-doing');
+  if(!el) return;
+  const where = activeRack ? ` in <b>${esc(rackName(activeRack))}</b>` : '';
+  el.innerHTML =
+    mode==='structure' ? `Clicking a cell adds or removes a slot${where}`
+  : mode==='erase'     ? `Clicking clears the brand${where}`
+  : active ? `Painting <b><span class="sw" style="background:${colorOf(active)}"></span>${esc(active)}</b>${where}`
+           : 'Pick a brand to paint with';
 }
 
 /* ============================================================
@@ -5737,6 +5772,8 @@ function rackEl(r){
   const done=bays.reduce((a,b)=>a+S.racks[r][b].filter(l=>(S.assign[r+b+'.'+l]||[]).length).length,0);
 
   const wrap=el('div','rack');
+  wrap.dataset.rack=r;
+  if(r===activeRack) wrap.classList.add('editing');
   const locked=isLocked(r);
   if(locked) wrap.classList.add('locked');
   const head=el('div','rackhead');
@@ -5878,6 +5915,7 @@ function commit(){ save(); renderRail(); renderMap(); renderSummary(); }
 $('#canvas').addEventListener('mousedown',e=>{
   const c=e.target.closest('.cell'); if(!c) return;
   e.preventDefault();
+  setActiveRack(c.dataset.rack);
   if(e.shiftKey){ selected=c.dataset.loc; scanLoc=c.dataset.loc; renderMap(); toast(`Scan slot set to ${scanLoc}`); return; }
   // Racks relock at every sign-in, so a deliberate click on a locked rack is
   // almost always someone who means to edit it. Offer the unlock rather than
@@ -5953,6 +5991,11 @@ $('#canvas').addEventListener('mouseleave',()=>tip.classList.remove('show'));
 $('#canvas').addEventListener('scroll',()=>tip.classList.remove('show'));
 
 document.querySelectorAll('.tool button').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;syncTool();});
+$('#rackstoggle').onclick=()=>{
+  const row=$('#rackrow');
+  row.classList.toggle('hidden');
+  $('#rackstoggle').classList.toggle('on',!row.classList.contains('hidden'));
+};
 $('#qtytoggle').onchange=e=>{ showQty=e.target.checked; renderMap(); };
 window.addEventListener('keydown',e=>{
   if(/input|textarea|select/i.test(e.target.tagName)) return;
