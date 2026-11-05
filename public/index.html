@@ -5891,7 +5891,18 @@ $('#canvas').addEventListener('mousedown',e=>{
     // Carry on with the click that was just made, so unlocking does not cost
     // the user the action they were trying to perform.
   }
-  if(c.classList.contains('void')&&mode!=='structure') return;
+  // A cell with no shelf defined used to swallow the click without a word,
+  // which reads as "this is locked" when it simply does not exist yet.
+  // Painting one now creates it and assigns the brand in the same click —
+  // the only sane reading of deliberately clicking an empty position.
+  if(c.classList.contains('void')&&mode!=='structure'){
+    if(mode==='erase') return;
+    if(!active) return toast('Pick a brand first');
+    const rk=c.dataset.rack, bay=c.dataset.bay, layer=+c.dataset.layer;
+    S.racks[rk]=S.racks[rk]||{};
+    S.racks[rk][bay]=[...new Set([...(S.racks[rk][bay]||[]),layer])].sort((a,b)=>a-b);
+    toast(`${c.dataset.loc} created`);
+  }
   painting=true; apply(c.dataset.loc); commit();
 });
 $('#canvas').addEventListener('mouseover',e=>{
