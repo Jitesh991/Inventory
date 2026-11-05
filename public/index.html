@@ -5879,7 +5879,18 @@ $('#canvas').addEventListener('mousedown',e=>{
   const c=e.target.closest('.cell'); if(!c) return;
   e.preventDefault();
   if(e.shiftKey){ selected=c.dataset.loc; scanLoc=c.dataset.loc; renderMap(); toast(`Scan slot set to ${scanLoc}`); return; }
-  if(isLocked(c.dataset.rack)) return toast(`Rack ${c.dataset.rack} is locked`);
+  // Racks relock at every sign-in, so a deliberate click on a locked rack is
+  // almost always someone who means to edit it. Offer the unlock rather than
+  // a toast that leaves them clicking a dead cell.
+  if(isLocked(c.dataset.rack)){
+    const rk=c.dataset.rack;
+    if(!isAdmin() && mode!=='structure') return toast(`${rackName(rk)} is locked`);
+    if(!confirm(`${rackName(rk)} is locked, so the map cannot be changed.\n\nUnlock it now?`)) return;
+    S.locks[rk]=false;
+    toast(`${rackName(rk)} unlocked`);
+    // Carry on with the click that was just made, so unlocking does not cost
+    // the user the action they were trying to perform.
+  }
   if(c.classList.contains('void')&&mode!=='structure') return;
   painting=true; apply(c.dataset.loc); commit();
 });
