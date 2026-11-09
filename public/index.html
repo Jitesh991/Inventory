@@ -7832,6 +7832,7 @@ function renderCount(){
           <span style="display:block;height:100%;width:${slots.length?done/slots.length*100:0}%;
             background:${done===slots.length&&slots.length?'var(--jade)':'var(--king)'}"></span></span>
       </div>
+      <button class="btn quiet" id="ct-sheets">Print sheets</button>
       <button class="btn quiet" id="ct-review">Review${done?` (${done})`:''}</button>
       <button class="btn quiet" id="ct-close">Finish</button>
     </div>
@@ -7867,6 +7868,7 @@ function renderCount(){
     countLoc=after; countRack=(after.match(/^[A-Z]{1,3}/)||[])[0];
     renderCount();
   };
+  $('#ct-sheets').onclick=openSheetBuilder;
   $('#ct-review').onclick=drawCountReview;
   $('#ct-close').onclick=()=>{
     if(!confirm(`Finish "${c.name}"? It moves to the finished list and can still be exported.`)) return;
@@ -8073,6 +8075,209 @@ function drawCountReview(){
     toast('Inventory updated from the count');
   };
   host.scrollIntoView?.({block:'nearest'});
+}
+
+/* ------------------------------------------------------------------
+   Paper count sheets.
+
+   Four slips to an A4, laid out like the existing SII-BORMAHECO form, so
+   what comes back from the floor matches what people already fill in. The
+   SKUs the map expects are printed on the slip; the counter writes the box
+   count by hand and the office keys it in afterwards.
+   ------------------------------------------------------------------ */
+const SHEET_COLS = ['LEVEL','ITEM CODE / SKU','INNER','PACKING','UOM','TOTAL BOX','TOTAL QTY IN PCS'];
+
+/** Which slots to print, and how many blank lines each slip carries. */
+function openSheetBuilder(){
+  const host=$('#ct-review-host');
+  const racks=Object.keys(S.racks).sort(sortRacks);
+  host.innerHTML=`<div class="card" style="border-color:var(--king)">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Print count sheets</h3>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="sb-close">Close</button>
+    </div>
+    <p class="lead">Four slips per A4, matching the form in use. Each slip lists the SKUs the map
+    expects in that slot, with blank lines underneath for anything else found there.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px">
+      <div><label>Racks</label>
+        <select id="sb-rack" style="width:100%">
+          <option value="">Every rack</option>
+          ${racks.map(r=>`<option value="${esc(r)}">${esc(isFloor(r)?rackName(r):'Rack '+r)}</option>`).join('')}
+        </select></div>
+      <div><label>Slots to include</label>
+        <select id="sb-scope" style="width:100%">
+          <option value="stocked">Only slots holding stock</option>
+          <option value="assigned">Every slot with a brand</option>
+          <option value="all">Every slot</option>
+        </select></div>
+      <div><label>Blank lines per slip</label>
+        <input type="number" id="sb-blank" min="0" max="20" value="4" style="width:100%"></div>
+    </div>
+    <div id="sb-count" class="note"></div>
+    <div class="row">
+      <button class="btn" id="sb-print">Print</button>
+      <button class="btn ghost" id="sb-xlsx">Download Excel</button>
+    </div>
+  </div>`;
+
+  const pick=()=>{
+    const r=$('#sb-rack').value, scope=$('#sb-scope').value;
+    const out=[];
+    Object.keys(S.racks).sort(sortRacks).forEach(rk=>{
+      if(r&&rk!==r) return;
+      Object.keys(S.racks[rk]).map(Number).sort((a,b)=>a-b).forEach(bay=>{
+        S.racks[rk][bay].slice().sort((a,b)=>a-b).forEach(l=>{
+          const loc=`${rk}${bay}.${l}`;
+          const stocked=(S.inv[loc]||[]).length>0;
+          const assigned=(S.assign[loc]||[]).length>0;
+          if(scope==='stocked'&&!stocked) return;
+          if(scope==='assigned'&&!assigned) return;
+          out.push(loc);
+        });
+      });
+    });
+    return out;
+  };
+  const refresh=()=>{
+    const n=pick().length;
+    $('#sb-count').textContent=`${n} slip${n===1?'':'s'} — ${Math.ceil(n/4)} A4 page${Math.ceil(n/4)===1?'':'s'}.`;
+  };
+  ['#sb-rack','#sb-scope'].forEach(x=>$(x).onchange=refresh);
+  refresh();
+  $('#sb-close').onclick=()=>{ host.innerHTML=''; };
+  $('#sb-print').onclick=()=>printCountSheets(pick(), +$('#sb-blank').value||0);
+  $('#sb-xlsx').onclick=()=>countSheetsXlsx(pick(), +$('#sb-blank').value||0);
+  host.scrollIntoView?.({block:'nearest'});
+}
+
+/** The rows that go on one slip. */
+function sheetRows(loc, blanks){
+  const rows=expectedAt(loc).map(e=>({
+    level: (loc.split('.')[1]||''),
+    sku: e.sku,
+    inner: '',
+    packing: e.packing ?? '',
+    uom: 'PCS'
+  }));
+  for(let i=0;i<blanks;i++) rows.push({level:'',sku:'',inner:'',packing:'',uom:''});
+  return rows;
+}
+
+function printCountSheets(locs, blanks){
+  if(!locs.length) return toast('No slots match that selection');
+  const c=activeCount();
+  const slip=loc=>{
+    const rows=sheetRows(loc,blanks);
+    return `<div class="slip">
+      <div class="slip-title">SII-BORMAHECO</div>
+      <table class="slip-head">
+        <tr><td class="k">Location:</td><td class="v loc">${esc(loc)}</td>
+            <td class="k">Date Count:</td><td class="v"></td></tr>
+        <tr><td class="k">Counter:</td><td class="v"></td>
+            <td class="k">Auditor:</td><td class="v"></td></tr>
+        <tr><td class="k">Verifier:</td><td class="v"></td><td></td><td></td></tr>
+      </table>
+      <table class="slip-grid">
+        <thead><tr>${SHEET_COLS.map(h=>`<th>${h}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(r=>`<tr>
+          <td>${esc(r.level)}</td><td class="sku">${esc(r.sku)}</td><td>${esc(r.inner)}</td>
+          <td>${r.packing===''?'':esc(String(r.packing))}</td><td>${esc(r.uom)}</td>
+          <td></td><td></td></tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+  };
+
+  const w=window.open('','_blank');
+  if(!w) return toast('Allow pop-ups to print the sheets');
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8">
+    <title>Count sheets${c?' — '+esc(c.name):''}</title>
+    <style>
+      @page{size:A4 portrait;margin:8mm}
+      *{box-sizing:border-box}
+      body{margin:0;font:11px/1.3 Arial,Helvetica,sans-serif;color:#000}
+      /* Two by two on every A4, which is how the existing form is used. */
+      .page{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;
+        gap:5mm;height:281mm;page-break-after:always}
+      .page:last-child{page-break-after:auto}
+      .slip{border:1px solid #000;padding:2mm;display:flex;flex-direction:column;overflow:hidden}
+      .slip-title{background:#bfbfbf;border:1px solid #000;text-align:center;font-weight:bold;
+        font-size:12px;padding:2px}
+      .slip-head{width:100%;border-collapse:collapse;margin:2mm 0}
+      .slip-head .k{font-weight:bold;white-space:nowrap;width:1%;padding:1px 3px 1px 0}
+      .slip-head .v{border-bottom:1px solid #000;padding:1px 3px}
+      .slip-head .loc{font-weight:bold;font-family:"Courier New",monospace;font-size:13px}
+      .slip-grid{width:100%;border-collapse:collapse;table-layout:fixed}
+      .slip-grid th{background:#d9ead3;border:1px solid #000;font-size:8px;padding:3px 1px;
+        text-align:center;line-height:1.1}
+      .slip-grid td{border:1px solid #000;height:16px;padding:1px 3px;font-size:9px}
+      .slip-grid td.sku{font-family:"Courier New",monospace;font-size:9px}
+      .slip-grid th:nth-child(1),.slip-grid td:nth-child(1){width:9%}
+      .slip-grid th:nth-child(2),.slip-grid td:nth-child(2){width:27%}
+      .slip-grid th:nth-child(3),.slip-grid td:nth-child(3){width:11%}
+      .slip-grid th:nth-child(4),.slip-grid td:nth-child(4){width:12%}
+      .slip-grid th:nth-child(5),.slip-grid td:nth-child(5){width:10%}
+      .slip-grid th:nth-child(6),.slip-grid td:nth-child(6){width:14%}
+      .slip-grid th:nth-child(7),.slip-grid td:nth-child(7){width:17%}
+    </style></head><body>
+    ${chunk(locs,4).map(g=>`<div class="page">${g.map(slip).join('')}</div>`).join('')}
+    </body></html>`);
+  w.document.close();
+  w.focus();
+  setTimeout(()=>w.print(),400);
+}
+
+const chunk=(a,n)=>a.reduce((out,x,i)=>(i%n?out[out.length-1].push(x):out.push([x]),out),[]);
+
+/** The same slips as a workbook, two across, for anyone who prints from Excel. */
+function countSheetsXlsx(locs, blanks){
+  if(!locs.length) return toast('No slots match that selection');
+  const aoa=[], merges=[];
+  const LEFT=1, RIGHT=9, WIDTH=7;      // columns B..H and J..P, as in the form
+
+  chunk(locs,2).forEach(pair=>{
+    const blocks=pair.map(loc=>{
+      const rows=sheetRows(loc,blanks);
+      const b=[];
+      b.push(['SII-BORMAHECO','','','','','','']);
+      b.push(['Location:',loc,'','Date Count:','','','']);
+      b.push(['Counter:','','','Auditor:','','','']);
+      b.push(['Verifier:','','','','','','']);
+      b.push(SHEET_COLS.slice());
+      rows.forEach(r=>b.push([r.level,r.sku,r.inner,r.packing,r.uom,'','']));
+      return b;
+    });
+    const height=Math.max(...blocks.map(b=>b.length));
+    for(let i=0;i<height;i++){
+      const row=new Array(RIGHT+WIDTH).fill('');
+      blocks.forEach((b,bi)=>{
+        const start = bi===0 ? LEFT : RIGHT;
+        (b[i]||[]).forEach((v,ci)=>{ row[start+ci]=v; });
+      });
+      aoa.push(row);
+      if(i===0) blocks.forEach((_,bi)=>{
+        const start = bi===0 ? LEFT : RIGHT;
+        merges.push({s:{r:aoa.length-1,c:start},e:{r:aoa.length-1,c:start+WIDTH-1}});
+      });
+    }
+    aoa.push(new Array(RIGHT+WIDTH).fill(''));   // a gap between bands
+  });
+
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges']=merges;
+  ws['!cols']=[{wch:2},{wch:9},{wch:20},{wch:9},{wch:10},{wch:8},{wch:11},{wch:15},{wch:2},
+               {wch:9},{wch:20},{wch:9},{wch:10},{wch:8},{wch:11},{wch:15}];
+  // Narrow margins help, but the writer does not carry a fit-to-width setting,
+  // so printing straight from Excel may need Scaling → Fit All Columns.
+  // The Print button produces the exact four-to-a-page layout instead.
+  ws['!margins']={left:0.25,right:0.25,top:0.3,bottom:0.3,header:0,footer:0};
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Count sheets');
+  const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
+  const c=activeCount();
+  download(`count-sheets${c?'-'+c.name.replace(/[^\w-]+/g,'_'):''}.xlsx`,
+    out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  toast(`${locs.length} slip${locs.length===1?'':'s'} downloaded`);
 }
 
 function countCsv(id){
