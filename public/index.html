@@ -77,6 +77,30 @@ button{cursor:pointer}
 .mb-check{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--ink-2);white-space:nowrap}
 .palette-h{display:flex;gap:5px;flex-wrap:wrap;min-width:0;flex:1 1 auto}
 .rackfilter-h{display:flex;gap:4px;flex-wrap:wrap;flex:1 1 auto}
+/* Counting sheet. Big targets and a visible picture: this is used standing at
+   a rack holding a phone, not sitting at a desk. */
+.countlist{display:flex;flex-direction:column;gap:8px;margin:14px 0}
+.countrow{display:grid;grid-template-columns:58px 1fr 96px 96px 84px;gap:12px;align-items:center;
+  padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--porcelain)}
+.countrow img,.countrow .noimg{width:58px;height:58px;object-fit:contain;border-radius:7px;
+  background:#fff;border:1px solid var(--line)}
+.countrow .noimg{border-style:dashed}
+.cr-sku{font-family:var(--mono);font-size:14.5px;font-weight:500;word-break:break-all}
+.cr-meta{font-size:11.5px;color:var(--ink-2);line-height:1.45}
+.cr-in label,.cr-total label{display:block;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-3);font-weight:600;margin-bottom:3px}
+.cr-in input{width:100%;padding:9px 10px;font-family:var(--mono);font-size:17px;text-align:right;
+  border:1px solid var(--line-2);border-radius:8px;background:#fff}
+.cr-in input:focus{outline:2px solid var(--king);outline-offset:-1px}
+.cr-total strong{font-family:var(--mono);font-size:17px;font-variant-numeric:tabular-nums}
+@media (max-width:820px){
+  .countrow{grid-template-columns:48px 1fr 1fr;grid-template-areas:'img id id' 'bx lo tt'}
+  .countrow img,.countrow .noimg{grid-area:img;width:48px;height:48px}
+  .cr-id{grid-area:id}
+  .countrow .cr-in:nth-of-type(1){grid-area:bx}
+  .countrow .cr-in:nth-of-type(2){grid-area:lo}
+  .cr-total{grid-area:tt;align-self:end;text-align:right}
+}
 .mb-doing{font-size:12px;color:var(--ink-2);white-space:nowrap}
 .mb-doing b{color:var(--ink);font-weight:600}
 .mb-doing .sw{display:inline-block;width:9px;height:9px;border-radius:2px;
@@ -421,6 +445,7 @@ tbody tr:hover td{background:#faf7f4}
       <div class="navgroup">Records</div>
       <button data-tab="catalog"><span class="dot"></span>Catalog</button>
       <button data-tab="inv"><span class="dot"></span>Inventory</button>
+      <button data-tab="count"><span class="dot"></span>Stock count</button>
       <button data-tab="summary"><span class="dot"></span>Dashboard</button>
 
       <div class="navgroup">Setup</div>
@@ -489,6 +514,7 @@ tbody tr:hover td{background:#faf7f4}
     <div class="panel hidden" id="p-catalog"></div>
     <div class="panel hidden" id="p-scan"></div>
       <div class="panel hidden" id="p-inv"></div>
+    <div class="panel hidden" id="p-count"></div>
     <div class="panel hidden" id="p-orders"></div>
     <div class="panel hidden" id="p-pullout"></div>
       <div class="panel hidden" id="p-summary"></div>
@@ -915,7 +941,7 @@ function seedSheets(){
 }
 function freshState(){
   return {racks:{}, brands:SEED_BRANDS.map(b=>({...b})), assign:{}, inv:{}, locks:{}, notes:{},
-    kinds:{}, labels:{}, catLines:[], dispatches:[], orders:[]};
+    kinds:{}, labels:{}, catLines:[], dispatches:[], orders:[], counts:[]};
 }
 
 /* Official brand colours always win over whatever an older save held.
@@ -7712,6 +7738,358 @@ async function renderUsers(){
 }
 
 /* ============================================================
+   Stock count — counting the floor, slot by slot
+
+   Built for someone standing at the rack with a phone: the picture and the
+   pack size are on screen, they type how many boxes, and the pieces are
+   worked out for them. Nothing touches the live inventory until the count
+   is applied, so a half-finished count can never corrupt the map.
+   ============================================================ */
+let countRack='', countLoc='', countOnlyStocked=true;
+
+const activeCount = () => (S.counts||[]).find(c=>c.status==='open') || null;
+
+/** Slots worth visiting: those holding stock, or every assigned slot. */
+function countSlots(){
+  const out=[];
+  Object.keys(S.racks).sort(sortRacks).forEach(r=>{
+    Object.keys(S.racks[r]).map(Number).sort((a,b)=>a-b).forEach(bay=>{
+      S.racks[r][bay].slice().sort((a,b)=>a-b).forEach(l=>{
+        const loc=`${r}${bay}.${l}`;
+        const has=(S.inv[loc]||[]).length>0;
+        if(has || (!countOnlyStocked && (S.assign[loc]||[]).length)) out.push(loc);
+      });
+    });
+  });
+  return out;
+}
+
+/** What the map says should be in a slot, with everything needed to show it. */
+function expectedAt(loc){
+  return (S.inv[loc]||[]).map(l=>{
+    const cat=catInfo(l.sku)||{};
+    return { sku:l.sku, packing:l.packing??cat.packing??null,
+      brand:cat.brand||'', imageUrl:cat.imageUrl||'', recorded:+l.qty||0 };
+  });
+}
+
+function startCount(){
+  const name=prompt('Name this count', `Count ${new Date().toLocaleDateString()}`);
+  if(name===null) return;
+  S.counts=[...(S.counts||[]), { id:'ct'+Date.now(), name:name.trim()||'Count',
+    startedAt:new Date().toLocaleString(), by:ME?.name||ME?.username||'',
+    status:'open', slots:{} }];
+  commit(); renderCount();
+}
+
+function renderCount(){
+  const c=activeCount();
+  const history=(S.counts||[]).filter(x=>x.status!=='open').slice().reverse();
+
+  if(!c){
+    $('#p-count').innerHTML=`
+      <h2>Stock count</h2>
+      <p class="lead">Count the floor slot by slot. Each slot shows what the map expects, with the
+      picture and pack size, and you enter how many boxes — the pieces are worked out for you.</p>
+      <div class="card">
+        <h3>No count in progress</h3>
+        <p class="lead" style="margin:0 0 12px">Start one, then work through the slots. Nothing is
+        applied to the inventory until you choose to apply it.</p>
+        <button class="btn" id="ct-start">Start a count</button>
+      </div>
+      ${history.length?`<div class="card"><h3>Finished counts</h3>
+        <table><thead><tr><th>Name</th><th>Started</th><th>By</th><th class="num">Slots</th><th></th></tr></thead>
+        <tbody>${history.map(h=>`<tr><td>${esc(h.name)}</td>
+          <td class="mono" style="font-size:11.5px">${esc(h.startedAt)}</td><td>${esc(h.by)}</td>
+          <td class="num">${Object.keys(h.slots||{}).length}</td>
+          <td style="text-align:right"><button class="btn quiet" data-ctcsv="${esc(h.id)}"
+            style="padding:2px 9px">CSV</button></td></tr>`).join('')}</tbody></table></div>`:''}`;
+    $('#ct-start').onclick=startCount;
+    $('#p-count').querySelectorAll('[data-ctcsv]').forEach(b=>b.onclick=()=>countCsv(b.dataset.ctcsv));
+    return;
+  }
+
+  const slots=countSlots();
+  const done=slots.filter(l=>c.slots[l]).length;
+  const racks=Object.keys(S.racks).sort(sortRacks);
+  if(countRack && !S.racks[countRack]) countRack='';
+  if(!countRack) countRack=(countLoc.match(/^[A-Z]{1,3}/)||[])[0] || racks[0] || '';
+
+  $('#p-count').innerHTML=`
+  <h2>Stock count</h2>
+  <div class="card" style="padding-top:14px;padding-bottom:14px">
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div>
+        <div style="font-weight:600;font-size:15px">${esc(c.name)}</div>
+        <div class="mono" style="font-size:11px;color:var(--ink-3)">started ${esc(c.startedAt)} · ${esc(c.by)}</div>
+      </div>
+      <span style="flex:1"></span>
+      <div style="min-width:170px">
+        <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--ink-2)">
+          <span>${done} of ${slots.length} slots</span>
+          <span class="mono">${slots.length?Math.round(done/slots.length*100):0}%</span></div>
+        <span style="display:block;height:6px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:4px">
+          <span style="display:block;height:100%;width:${slots.length?done/slots.length*100:0}%;
+            background:${done===slots.length&&slots.length?'var(--jade)':'var(--king)'}"></span></span>
+      </div>
+      <button class="btn quiet" id="ct-review">Review${done?` (${done})`:''}</button>
+      <button class="btn quiet" id="ct-close">Finish</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="scanbar" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div class="fld"><label>Rack</label>
+        <select id="ct-rack">${racks.map(r=>`<option value="${esc(r)}" ${r===countRack?'selected':''}>${
+          esc(isFloor(r)?rackName(r):'Rack '+r)}</option>`).join('')}</select></div>
+      <div class="fld"><label>Slot</label><select id="ct-slot"></select></div>
+      <div class="fld"><label>&nbsp;</label>
+        <div class="row" style="margin:0">
+          <button class="btn ghost" id="ct-next" style="flex:1">Next uncounted →</button>
+        </div></div>
+    </div>
+    <label class="mb-check" style="margin-top:10px">
+      <input type="checkbox" id="ct-onlystocked" ${countOnlyStocked?'checked':''}>
+      Only slots that hold stock (${slots.length})</label>
+  </div>
+
+  <div id="ct-sheet"></div>
+  <div id="ct-review-host"></div>`;
+
+  drawCountSlots();
+  $('#ct-rack').onchange=e=>{ countRack=e.target.value; countLoc=''; drawCountSlots(); drawCountSheet(); };
+  $('#ct-slot').onchange=e=>{ countLoc=e.target.value; drawCountSheet(); };
+  $('#ct-onlystocked').onchange=e=>{ countOnlyStocked=e.target.checked; renderCount(); };
+  $('#ct-next').onclick=()=>{
+    const list=countSlots().filter(l=>!c.slots[l]);
+    if(!list.length) return toast('Every slot in this list is counted');
+    const after=list.find(l=>sortLoc(l,countLoc)>0) || list[0];
+    countLoc=after; countRack=(after.match(/^[A-Z]{1,3}/)||[])[0];
+    renderCount();
+  };
+  $('#ct-review').onclick=drawCountReview;
+  $('#ct-close').onclick=()=>{
+    if(!confirm(`Finish "${c.name}"? It moves to the finished list and can still be exported.`)) return;
+    c.status='closed'; c.finishedAt=new Date().toLocaleString();
+    commit(); renderCount();
+  };
+  drawCountSheet();
+}
+
+function drawCountSlots(){
+  const sel=$('#ct-slot'); if(!sel) return;
+  const c=activeCount();
+  const out=[];
+  Object.keys(S.racks[countRack]||{}).map(Number).sort((a,b)=>a-b).forEach(bay=>{
+    S.racks[countRack][bay].slice().sort((a,b)=>a-b).forEach(l=>{
+      const loc=`${countRack}${bay}.${l}`;
+      const n=(S.inv[loc]||[]).length;
+      if(countOnlyStocked && !n) return;
+      out.push(`<option value="${esc(loc)}" ${loc===countLoc?'selected':''}>${esc(loc)}${
+        n?` — ${n} SKU${n===1?'':'s'}`:' — empty'}${c.slots[loc]?' ✓':''}</option>`);
+    });
+  });
+  sel.innerHTML=out.length?out.join(''):'<option value="">nothing to count in this rack</option>';
+  if(!countLoc || !out.some(o=>o.includes(`value="${countLoc}"`))) countLoc=sel.value||'';
+}
+
+/** The counting sheet for one slot. */
+function drawCountSheet(){
+  const host=$('#ct-sheet'); if(!host) return;
+  const c=activeCount();
+  const loc=countLoc;
+  if(!loc){ host.innerHTML='<div class="card"><p class="lead" style="margin:0">Pick a slot to count.</p></div>'; return; }
+
+  const saved=c.slots[loc];
+  const rows = saved ? saved.lines : expectedAt(loc).map(e=>({...e, boxes:'', loose:''}));
+  const brands=(S.assign[loc]||[]).join(' & ');
+
+  host.innerHTML=`<div class="card" style="border-color:var(--king)">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0;font-family:var(--mono);font-size:19px">${esc(loc)}</h3>
+      ${brands?`<span style="font-size:13px;color:var(--ink-2)">${esc(brands)}</span>`:''}
+      <span style="flex:1"></span>
+      ${saved?`<span class="pill ok">counted ${esc(saved.at)}</span>`:''}
+    </div>
+
+    ${rows.length?`<div class="countlist">${rows.map((r,i)=>`
+      <div class="countrow" data-i="${i}">
+        ${r.imageUrl?`<img src="${esc(r.imageUrl)}" alt="" loading="lazy"
+          onerror="this.style.visibility='hidden'">`:'<span class="noimg"></span>'}
+        <div class="cr-id">
+          <div class="cr-sku">${esc(r.sku)}</div>
+          <div class="cr-meta">${r.brand?esc(r.brand)+' · ':''}${
+            r.packing!=null?`${r.packing} pcs per box`:'<span style="color:var(--terra)">no pack size</span>'}</div>
+          <div class="cr-meta">map says ${(+r.recorded||0).toLocaleString()} pcs</div>
+        </div>
+        <div class="cr-in">
+          <label>Boxes</label>
+          <input type="number" min="0" step="1" data-cboxes="${i}" value="${r.boxes??''}"
+            inputmode="numeric" placeholder="0">
+        </div>
+        <div class="cr-in">
+          <label>Loose pcs</label>
+          <input type="number" min="0" step="1" data-cloose="${i}" value="${r.loose??''}"
+            inputmode="numeric" placeholder="0">
+        </div>
+        <div class="cr-total"><label>Total</label><strong data-ctotal="${i}">—</strong></div>
+      </div>`).join('')}</div>`
+      : '<p class="lead">The map has nothing recorded here. Add whatever you find.</p>'}
+
+    <div class="row">
+      <input type="text" id="ct-add" placeholder="Scan or type a SKU found here"
+        style="flex:1;min-width:190px">
+      <button class="btn quiet" id="ct-addgo">Add to this slot</button>
+      <span style="flex:1"></span>
+      <strong id="ct-slottotal" class="mono" style="font-size:15px"></strong>
+      <button class="btn" id="ct-save">${saved?'Update this slot':'Save this slot'}</button>
+    </div>
+    <div id="ct-err" class="note bad hidden"></div>
+  </div>`;
+
+  const recalc=()=>{
+    let slotTotal=0;
+    rows.forEach((r,i)=>{
+      const b=Number(($(`[data-cboxes="${i}"]`)||{}).value)||0;
+      const lo=Number(($(`[data-cloose="${i}"]`)||{}).value)||0;
+      const qty=(r.packing?b*r.packing:0)+lo;
+      const cell=$(`[data-ctotal="${i}"]`);
+      if(cell){
+        cell.textContent=qty?qty.toLocaleString():'—';
+        const diff=qty-(+r.recorded||0);
+        cell.style.color = !qty ? '' : diff===0 ? 'var(--jade)' : 'var(--terra)';
+        cell.title = qty ? (diff===0?'matches the map':`${diff>0?'+':''}${diff} vs the map`) : '';
+      }
+      slotTotal+=qty;
+    });
+    const st=$('#ct-slottotal');
+    if(st) st.textContent=slotTotal?`${slotTotal.toLocaleString()} pcs`:'';
+  };
+
+  host.querySelectorAll('[data-cboxes],[data-cloose]').forEach(inp=>{
+    inp.oninput=recalc;
+    // Enter walks down the sheet, so a whole slot can be keyed without the mouse.
+    inp.onkeydown=e=>{
+      if(e.key!=='Enter') return;
+      e.preventDefault();
+      const all=[...host.querySelectorAll('[data-cboxes],[data-cloose]')];
+      const next=all[all.indexOf(inp)+1];
+      next ? next.focus() : $('#ct-save').click();
+    };
+  });
+  recalc();
+  host.querySelector('[data-cboxes="0"]')?.focus();
+
+  $('#ct-addgo').onclick=()=>{
+    const raw=$('#ct-add').value.trim();
+    if(!raw) return;
+    const rec=lookup(raw);
+    const err=$('#ct-err');
+    if(!rec){ err.textContent=`${raw} is not in the catalog. Add it on the Catalog tab first.`;
+      err.classList.remove('hidden'); return; }
+    if(rows.some(r=>r.sku===rec.sku)){ err.textContent=`${rec.sku} is already on this sheet.`;
+      err.classList.remove('hidden'); return; }
+    const cat=catInfo(rec.sku)||{};
+    rows.push({ sku:rec.sku, packing:rec.packing??null, brand:rec.brand||'',
+      imageUrl:cat.imageUrl||'', recorded:0, boxes:'', loose:'' });
+    c.slots[loc]={ lines:rows, at:(c.slots[loc]||{}).at||'', by:ME?.name||ME?.username||'', draft:true };
+    drawCountSheet();
+  };
+  $('#ct-add').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); $('#ct-addgo').click(); } };
+
+  $('#ct-save').onclick=()=>{
+    rows.forEach((r,i)=>{
+      r.boxes=($(`[data-cboxes="${i}"]`)||{}).value||'';
+      r.loose=($(`[data-cloose="${i}"]`)||{}).value||'';
+      r.counted=(r.packing?(Number(r.boxes)||0)*r.packing:0)+(Number(r.loose)||0);
+    });
+    c.slots[loc]={ lines:rows, at:new Date().toLocaleString(),
+      by:ME?.name||ME?.username||'', draft:false };
+    commit();
+    toast(`${loc} counted`);
+    $('#ct-next').click();
+  };
+}
+
+/** Counted against recorded, with the option to make the map match. */
+function drawCountReview(){
+  const c=activeCount();
+  const host=$('#ct-review-host');
+  const locs=Object.keys(c.slots).filter(l=>!c.slots[l].draft).sort(sortLoc);
+  if(!locs.length){ host.innerHTML='<div class="card"><p class="lead" style="margin:0">Nothing counted yet.</p></div>'; return; }
+
+  const rows=[];
+  locs.forEach(loc=>c.slots[loc].lines.forEach(l=>{
+    const counted=+l.counted||0, rec=+l.recorded||0;
+    rows.push({loc, sku:l.sku, counted, recorded:rec, diff:counted-rec});
+  }));
+  const off=rows.filter(r=>r.diff!==0);
+
+  host.innerHTML=`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Review</h3>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="cr-csv">Download CSV</button>
+      ${isAdmin()&&off.length?`<button class="btn" id="cr-apply">Make the map match (${off.length})</button>`:''}
+    </div>
+    <div class="stats">
+      <div><span>Slots counted</span><strong>${locs.length}</strong></div>
+      <div><span>Lines</span><strong>${rows.length}</strong></div>
+      <div><span>Match</span><strong>${rows.length-off.length}</strong></div>
+      <div><span>Differ</span><strong>${off.length}</strong></div>
+    </div>
+    <div class="scroll cap"><table>
+      <thead><tr><th>Slot</th><th>SKU</th><th class="num">Map</th><th class="num">Counted</th>
+        <th class="num">Difference</th></tr></thead>
+      <tbody>${rows.map(r=>`<tr>
+        <td class="mono">${esc(r.loc)}</td><td class="mono">${esc(r.sku)}</td>
+        <td class="num">${r.recorded.toLocaleString()}</td>
+        <td class="num">${r.counted.toLocaleString()}</td>
+        <td class="num" style="${r.diff?'color:var(--terra);font-weight:600':'color:var(--jade)'}">${
+          r.diff?(r.diff>0?'+':'')+r.diff.toLocaleString():'—'}</td></tr>`).join('')}</tbody></table></div>
+  </div>`;
+
+  $('#cr-csv').onclick=()=>countCsv(c.id);
+  const ap=$('#cr-apply');
+  if(ap) ap.onclick=()=>{
+    if(!confirm(`Overwrite the map with the counted figures for ${off.length} line${
+      off.length===1?'':'s'}?\n\nThis is the point of no return for this count.`)) return;
+    locs.forEach(loc=>{
+      const lines=c.slots[loc].lines;
+      S.inv[loc]=S.inv[loc]||[];
+      lines.forEach(l=>{
+        const hit=S.inv[loc].find(x=>x.sku===l.sku);
+        const qty=+l.counted||0;
+        if(hit){ hit.qty=qty; hit.packing=l.packing??hit.packing;
+          hit.boxes=hit.packing?+(qty/hit.packing).toFixed(2):null; }
+        else if(qty) S.inv[loc].push({sku:l.sku,packing:l.packing??null,qty,
+          boxes:l.packing?+(qty/l.packing).toFixed(2):null});
+      });
+      S.inv[loc]=S.inv[loc].filter(x=>(+x.qty||0)!==0);
+      if(!S.inv[loc].length) delete S.inv[loc];
+    });
+    c.appliedAt=new Date().toLocaleString(); c.appliedBy=ME?.name||ME?.username||'';
+    commit(); renderCount(); drawCountReview();
+    toast('Inventory updated from the count');
+  };
+  host.scrollIntoView?.({block:'nearest'});
+}
+
+function countCsv(id){
+  const c=(S.counts||[]).find(x=>x.id===id); if(!c) return;
+  const rows=[['Count',c.name],['Started',c.startedAt],['By',c.by],[],
+    ['Slot','SKU','Brand','Packing','Boxes','Loose','Counted','Map','Difference']];
+  Object.keys(c.slots).sort(sortLoc).forEach(loc=>c.slots[loc].lines.forEach(l=>{
+    const counted=+l.counted||0;
+    rows.push([loc,l.sku,l.brand||'',l.packing??'',l.boxes||0,l.loose||0,
+      counted,l.recorded||0,counted-(+l.recorded||0)]);
+  }));
+  const csv=rows.map(r=>r.map(v=>/[",\n]/.test(String(v))?`"${String(v).replace(/"/g,'""')}"`:v).join(',')).join('\n');
+  download(`${c.name.replace(/[^\w-]+/g,'_')}.csv`,csv,'text/csv');
+  toast('Count CSV downloaded');
+}
+
+/* ============================================================
    Orders — what was ordered, and picking it off the map
 
    An order summary comes in as a spreadsheet: PO number, SKU, quantity.
@@ -9263,6 +9641,7 @@ document.querySelectorAll('.railnav button').forEach(b=>b.onclick=()=>{
   $('#canvas').classList.toggle('hidden',t!=='map');
   $('#p-catalog').classList.toggle('hidden',t!=='catalog');
   $('#p-inv').classList.toggle('hidden',t!=='inv');
+  $('#p-count').classList.toggle('hidden',t!=='count');
   $('#p-orders').classList.toggle('hidden',t!=='orders');
   $('#p-pullout').classList.toggle('hidden',t!=='pullout');
   $('#p-scan').classList.toggle('hidden',t!=='scan');
@@ -9274,6 +9653,7 @@ document.querySelectorAll('.railnav button').forEach(b=>b.onclick=()=>{
   if(t!=='scan'&&camStream){ camStream.getTracks().forEach(x=>x.stop()); camStream=null; }
   if(t==='catalog') renderCatalog();
   if(t==='inv') renderInv();
+  if(t==='count') renderCount();
   if(t==='orders') renderOrders();
   if(t==='pullout') renderPullout();
   if(t==='scan') renderScan();
@@ -9284,8 +9664,8 @@ document.querySelectorAll('.railnav button').forEach(b=>b.onclick=()=>{
 
 async function boot(){
   const saved=await loadSaved();
-  if(saved&&saved.racks) S={inv:{},locks:{},notes:{},kinds:{},labels:{},catLines:[],dispatches:[],orders:[],...saved};
-  S.kinds=S.kinds||{}; S.labels=S.labels||{}; S.catLines=S.catLines||[]; S.dispatches=S.dispatches||[]; S.orders=S.orders||[];
+  if(saved&&saved.racks) S={inv:{},locks:{},notes:{},kinds:{},labels:{},catLines:[],dispatches:[],orders:[],counts:[],...saved};
+  S.kinds=S.kinds||{}; S.labels=S.labels||{}; S.catLines=S.catLines||[]; S.dispatches=S.dispatches||[]; S.orders=S.orders||[]; S.counts=S.counts||[];
   applyOfficialColors();
   // Only an administrator may seed the rack sheets; a scanner's copy would be
   // reverted by the server anyway, so it is not attempted.
