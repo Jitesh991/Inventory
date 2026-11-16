@@ -7848,27 +7848,54 @@ let countRack='', countLoc='', countOnlyStocked=true;
 const activeCount = () => (S.counts||[]).find(c=>c.status==='open') || null;
 
 /** Slots worth visiting: those holding stock, or every assigned slot. */
+/**
+ * Where a SKU is supposed to be, according to the catalog.
+ *
+ * Built once per redraw from the catalog's placements rather than from the
+ * inventory. The inventory is the running figure that scans and pullouts move
+ * about; the catalog is the standing record of what belongs where, and that is
+ * what a count sheet should list — otherwise a slot emptied by a pullout
+ * disappears from the sheet and nobody checks whether it is really empty.
+ */
+function catalogByLocation(){
+  const map={};
+  (S.catLines||[]).forEach(l=>{
+    catPlaces(l).forEach(p=>{
+      (map[p.loc]=map[p.loc]||[]).push({ line:l, placed:p.qty });
+    });
+  });
+  return map;
+}
+
+/** Slots worth visiting: those the catalog places something in. */
 function countSlots(){
+  const byLoc=catalogByLocation();
   const out=[];
   Object.keys(S.racks).sort(sortRacks).forEach(r=>{
     Object.keys(S.racks[r]).map(Number).sort((a,b)=>a-b).forEach(bay=>{
       S.racks[r][bay].slice().sort((a,b)=>a-b).forEach(l=>{
         const loc=`${r}${bay}.${l}`;
-        const has=(S.inv[loc]||[]).length>0;
-        if(has || (!countOnlyStocked && (S.assign[loc]||[]).length)) out.push(loc);
+        const listed=(byLoc[loc]||[]).length>0;
+        if(listed || (!countOnlyStocked && (S.assign[loc]||[]).length)) out.push(loc);
       });
     });
   });
   return out;
 }
 
-/** What the map says should be in a slot, with everything needed to show it. */
+/** The lines to print or key for one slot, from the catalog. */
 function expectedAt(loc){
-  return (S.inv[loc]||[]).map(l=>{
-    const cat=catInfo(l.sku)||{};
-    return { sku:l.sku, packing:l.packing??cat.packing??null,
-      brand:cat.brand||'', imageUrl:cat.imageUrl||'', recorded:+l.qty||0 };
-  });
+  const here=catalogByLocation()[loc]||[];
+  return here.map(({line,placed})=>({
+    sku: line.sku,
+    packing: line.packing ?? null,
+    brand: line.brand || '',
+    imageUrl: line.imageUrl || '',
+    // "map says" on the sheet, and the figure the count is compared against:
+    // the live quantity, which is the thing being verified.
+    recorded: (S.inv[loc]||[]).filter(x=>x.sku===line.sku)
+      .reduce((a,x)=>a+(+x.qty||0),0)
+  }));
 }
 
 function startCount(){
@@ -7949,7 +7976,7 @@ function renderCount(){
     </div>
     <label class="mb-check" style="margin-top:10px">
       <input type="checkbox" id="ct-onlystocked" ${countOnlyStocked?'checked':''}>
-      Only slots that hold stock (${slots.length})</label>
+      Only slots the catalog lists (${slots.length})</label>
   </div>
 
   <div id="ct-sheet"></div>
@@ -8205,7 +8232,7 @@ function openSheetBuilder(){
         </select></div>
       <div><label>Slots to include</label>
         <select id="sb-scope" style="width:100%">
-          <option value="stocked">Only slots holding stock</option>
+          <option value="listed">Only slots the catalog lists</option>
           <option value="assigned">Every slot with a brand</option>
           <option value="all">Every slot</option>
         </select></div>
@@ -8221,16 +8248,16 @@ function openSheetBuilder(){
 
   const pick=()=>{
     const r=$('#sb-rack').value, scope=$('#sb-scope').value;
+    const byLoc=catalogByLocation();
     const out=[];
     Object.keys(S.racks).sort(sortRacks).forEach(rk=>{
       if(r&&rk!==r) return;
       Object.keys(S.racks[rk]).map(Number).sort((a,b)=>a-b).forEach(bay=>{
         S.racks[rk][bay].slice().sort((a,b)=>a-b).forEach(l=>{
           const loc=`${rk}${bay}.${l}`;
-          const stocked=(S.inv[loc]||[]).length>0;
-          const assigned=(S.assign[loc]||[]).length>0;
-          if(scope==='stocked'&&!stocked) return;
-          if(scope==='assigned'&&!assigned) return;
+          // The catalog decides what belongs where, here as on the sheet.
+          if(scope==='listed' && !(byLoc[loc]||[]).length) return;
+          if(scope==='assigned' && !(S.assign[loc]||[]).length) return;
           out.push(loc);
         });
       });
