@@ -18,12 +18,54 @@ const PATH = 'warehouse/state.json';
 /**
  * Only an administrator may change these.
  *
- * Locks are deliberately NOT here. A lock guards the rack layout from stray
- * clicks, and painting is already refused for scanners, so a scanner toggling
- * one changes nothing structural — but reverting it server-side meant their
- * unlock silently re-locked itself on the next save, which blocked scanning.
+ * The document now holds one entry per warehouse, so the guarded keys live
+ * inside each site rather than at the top level. The brand palette is shared
+ * across sites and is guarded too; the SKU master is not, because scanners
+ * legitimately add barcodes and pack sizes while counting.
+ *
+ * Locks are deliberately absent: a lock guards the layout from stray clicks,
+ * painting is already refused for scanners, and reverting it server-side made
+ * their unlock snap back and blocked scanning.
  */
-const STRUCTURAL = ['racks', 'assign', 'brands', 'kinds', 'labels'];
+const SITE_STRUCTURAL = ['racks', 'assign', 'kinds', 'labels'];
+
+/** Replace the parts a scanner may not change with what is already stored. */
+function guardForScanner(incoming, current) {
+  const guarded = [];
+  if (!current) return { toSave: incoming, guarded };
+
+  const out = { ...incoming };
+
+  // Shared half: the brand palette only.
+  out.shared = { ...(incoming.shared || {}) };
+  if (current.shared && 'brands' in current.shared) {
+    if (JSON.stringify(out.shared.brands) !== JSON.stringify(current.shared.brands)) {
+      guarded.push('brands');
+    }
+    out.shared.brands = current.shared.brands;
+  }
+
+  // Each site's layout.
+  out.sites = { ...(incoming.sites || {}) };
+  for (const [id, site] of Object.entries(out.sites)) {
+    const was = current.sites && current.sites[id];
+    if (!was) { guarded.push(`new site ${id}`); delete out.sites[id]; continue; }
+    const merged = { ...site };
+    for (const k of SITE_STRUCTURAL) {
+      if (k in was) {
+        if (JSON.stringify(site[k]) !== JSON.stringify(was[k])) guarded.push(`${id}.${k}`);
+        merged[k] = was[k];
+      }
+    }
+    merged.name = was.name;            // renaming a warehouse is an admin act
+    out.sites[id] = merged;
+  }
+  // A site the browser dropped is kept: scanners never delete warehouses.
+  for (const [id, was] of Object.entries(current.sites || {})) {
+    if (!out.sites[id]) { out.sites[id] = was; guarded.push(`removed site ${id}`); }
+  }
+  return { toSave: out, guarded };
+}
 
 async function readState() {
   const state = await readBlob(PATH);
@@ -48,19 +90,10 @@ export default async function handler(req, res) {
       }
 
       let toSave = incoming;
-      const guarded = [];
+      let guarded = [];
       if (!isAdmin(me)) {
         const { state: current } = await readState();
-        if (current) {
-          toSave = { ...incoming };
-          for (const k of STRUCTURAL) {
-            if (k in current) {
-              // Only report the ones the browser actually tried to change.
-              if (JSON.stringify(incoming[k]) !== JSON.stringify(current[k])) guarded.push(k);
-              toSave[k] = current[k];
-            }
-          }
-        }
+        ({ toSave, guarded } = guardForScanner(incoming, current));
       }
 
       const body = JSON.stringify(toSave);
