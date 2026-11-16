@@ -29,6 +29,50 @@ const PATH = 'warehouse/state.json';
  */
 const SITE_STRUCTURAL = ['racks', 'assign', 'kinds', 'labels'];
 
+/**
+ * Fold a save into what is already stored, slot by slot, for stock counts.
+ *
+ * Every browser holds the whole document and writes the whole document, so
+ * without this the last save wins: two people counting different slots at the
+ * same time would erase each other, silently, with no way to tell which
+ * figures were lost. Counts are the one place where that is certain to happen,
+ * because a count runs for days with several people keying at once.
+ *
+ * Slots are independent — nobody counts the same slot twice — so taking what
+ * is stored as the base and laying the incoming slots over it is both safe and
+ * enough. A slot is only ever added or re-counted, never removed.
+ */
+function mergeCounts(incoming, current) {
+  if (!current || !current.sites) return incoming;
+  const merged = [];
+
+  for (const [siteId, site] of Object.entries(incoming.sites || {})) {
+    const was = current.sites[siteId];
+    if (!was || !Array.isArray(was.counts) || !Array.isArray(site.counts)) continue;
+
+    site.counts.forEach(count => {
+      const stored = was.counts.find(c => c.id === count.id);
+      if (!stored || !stored.slots) return;
+      for (const [loc, slot] of Object.entries(stored.slots)) {
+        if (!(loc in (count.slots || {}))) {
+          count.slots = count.slots || {};
+          count.slots[loc] = slot;
+          merged.push(`${siteId}:${count.id}:${loc}`);
+        }
+      }
+    });
+
+    // A count someone else started while this browser was open.
+    was.counts.forEach(stored => {
+      if (!site.counts.some(c => c.id === stored.id)) {
+        site.counts.push(stored);
+        merged.push(`${siteId}:${stored.id} (whole count)`);
+      }
+    });
+  }
+  return incoming;
+}
+
 /** Replace the parts a scanner may not change with what is already stored. */
 function guardForScanner(incoming, current) {
   const guarded = [];
@@ -89,11 +133,14 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Empty body — refusing to overwrite with nothing.' });
       }
 
-      let toSave = incoming;
+      // Read what is stored once, and use it both to merge counts and to
+      // hold a scanner to what they may change.
+      const { state: current } = await readState();
+
+      let toSave = mergeCounts(incoming, current);
       let guarded = [];
       if (!isAdmin(me)) {
-        const { state: current } = await readState();
-        ({ toSave, guarded } = guardForScanner(incoming, current));
+        ({ toSave, guarded } = guardForScanner(toSave, current));
       }
 
       const body = JSON.stringify(toSave);
