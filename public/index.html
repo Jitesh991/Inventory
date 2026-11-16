@@ -195,6 +195,15 @@ button{cursor:pointer}
   border-radius:7px;background:#fff}
 .gate-card input:focus{outline:2px solid var(--king);outline-offset:-1px;border-color:var(--king)}
 .gate-foot{margin:24px 0 40px;font-size:12.5px;color:var(--ink-3)}
+.sitelist{display:flex;flex-direction:column;gap:10px;text-align:left}
+.sitebtn{display:flex;align-items:center;gap:12px;width:100%;padding:15px 17px;background:var(--card);
+  border:1px solid var(--line);border-radius:11px;cursor:pointer;text-align:left;
+  transition:border-color .12s,box-shadow .12s}
+.sitebtn:hover{border-color:var(--king);box-shadow:0 0 0 2px var(--king-soft)}
+.sitebtn .nm{flex:1;font-size:15.5px;font-weight:600;color:var(--ink)}
+.sitebtn .sub{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-top:2px;font-weight:400}
+.sitebtn .go{color:var(--king);font-size:18px}
+#sitepick{max-width:440px}
 .app.hidden{display:none}
 /* A scanner reads the map; the editing furniture is not theirs. */
 body.scanner #mapbar .mb-group:nth-child(1),
@@ -422,6 +431,24 @@ tbody tr:hover td{background:#faf7f4}
   <p class="gate-foot">Sign out when you are done with a shared terminal.</p>
 </div>
 
+<div id="sitepick" class="gate hidden">
+  <div class="gate-mark">
+    <svg viewBox="0 0 32 32" width="30" height="30" fill="none">
+      <circle cx="16" cy="16" r="6.5" fill="#fff"/>
+      <g stroke="#fff" stroke-width="2.4" stroke-linecap="round">
+        <path d="M16 2.5v4"/><path d="M16 25.5v4"/><path d="M2.5 16h4"/><path d="M25.5 16h4"/>
+        <path d="M6.4 6.4l2.8 2.8"/><path d="M22.8 22.8l2.8 2.8"/>
+        <path d="M25.6 6.4l-2.8 2.8"/><path d="M9.2 22.8l-2.8 2.8"/>
+      </g>
+    </svg>
+  </div>
+  <h1>Which warehouse?</h1>
+  <p class="gate-sub">The map and the stock are kept separately for each one.
+  Products and brands are shared.</p>
+  <div class="sitelist" id="sitelist"></div>
+  <p class="gate-foot">You can switch at any time from the top bar.</p>
+</div>
+
 <div class="app hidden">
   <aside class="rail">
     <div class="brandbar">
@@ -472,6 +499,8 @@ tbody tr:hover td{background:#faf7f4}
   <div class="main">
     <div class="top">
       <div class="spacer"></div>
+      <button class="btn quiet" id="sitebtn" style="padding:5px 11px;font-size:12.5px">
+        <span id="sitelabel"></span> ▾</button>
       <span class="savestate saved" id="savestate">Saved</span>
       <div style="text-align:right;line-height:1.2">
         <div id="whoName" style="font-size:12.5px;font-weight:600"></div>
@@ -570,13 +599,79 @@ async function api(path, opts = {}) {
   return body;
 }
 
+/* ------------------------------------------------------------------
+   Sites.
+
+   One stored document holds every warehouse. The SKU master and the brand
+   palette are shared — a product is the same product wherever it sits — and
+   everything tied to a physical place (racks, stock, pullouts, orders,
+   counts) belongs to one site.
+
+   The rest of the app still works against a flat `S`, which is the shared
+   half merged with the chosen site. Saving splits it back.
+   ------------------------------------------------------------------ */
+const SHARED_KEYS = ['brands','catLines'];
+const SITE_KEYS   = ['racks','assign','inv','locks','kinds','labels','notes',
+                     'dispatches','orders','counts'];
+
+let DOC = null;            // the whole document, every site
+let SITE = '';             // the site being worked in
+
+const siteList = () => Object.entries(DOC?.sites||{})
+  .map(([id,v])=>({id, name:v.name||id}))
+  .sort((a,b)=>a.name.localeCompare(b.name));
+const siteName = id => DOC?.sites?.[id]?.name || id;
+
+/* seedSheets is the transcription of the original warehouse's rack sheets, so
+   it must never run for a warehouse someone adds — that one starts empty and
+   gets its own layout. */
+const blankSite = name => ({ name, seeded:true, racks:{}, assign:{}, inv:{}, locks:{}, kinds:{},
+  labels:{}, notes:{}, dispatches:[], orders:[], counts:[] });
+
+/** Turn whatever is stored into the multi-site shape, once. */
+function toMultiSite(doc){
+  if(doc && doc.sites) return doc;
+  // A single-warehouse document from before: move it under its own site so
+  // nothing is lost and nobody has to re-enter anything.
+  const old = doc || {};
+  const site = blankSite('Main warehouse');
+  // The original warehouse still gets its transcribed rack sheets; only a
+  // warehouse added later starts deliberately empty.
+  delete site.seeded;
+  SITE_KEYS.forEach(k=>{ if(old[k]!==undefined) site[k]=old[k]; });
+  return {
+    version: 2,
+    shared: { brands: old.brands || [], catLines: old.catLines || [] },
+    sites: { main: site }
+  };
+}
+
+/** The flat state the rest of the app expects. */
+function projectSite(id){
+  const site=DOC.sites[id];
+  const out={};
+  SHARED_KEYS.forEach(k=>out[k]=DOC.shared[k]);
+  SITE_KEYS.forEach(k=>out[k]=site[k]);
+  return out;
+}
+
+/** Fold the working state back into the document before saving. */
+function absorbSite(){
+  if(!DOC||!SITE) return;
+  SHARED_KEYS.forEach(k=>{ DOC.shared[k]=S[k]; });
+  const site=DOC.sites[SITE];
+  SITE_KEYS.forEach(k=>{ site[k]=S[k]; });
+}
+
 async function loadSaved(){
   try{
     const j = await api('/api/state');
+    DOC = toMultiSite(j.state);
     saveState('saved');
-    return j.state || null;
+    return null;                       // the site is chosen before S is built
   }catch(e){
     saveState('error', e.message);
+    DOC = toMultiSite(null);
     return null;
   }
 }
@@ -589,18 +684,17 @@ function save(){
 }
 async function flush(){
   if(saving){ pending=true; return; }
+  if(!DOC||!SITE) return;
   saving=true;
   saveState('saving');
   try{
-    const out = await api('/api/state', { method:'PUT', body: JSON.stringify(S) });
-    // The server reverts anything a scanner is not allowed to change, and says
-    // which parts. Silently accepting the write would leave the screen showing
-    // edits that were never stored.
+    absorbSite();
+    const out = await api('/api/state', { method:'PUT', body: JSON.stringify(DOC) });
     if(out.guarded && out.guarded.length){
       saveState('saved');
       toast('Saved, but rack layout changes were not — that needs an administrator.');
       const fresh = await api('/api/state');
-      if(fresh.state){ S = fresh.state; commitLocal(); }
+      if(fresh.state){ DOC=toMultiSite(fresh.state); S=projectSite(SITE); commitLocal(); }
     } else saveState('saved');
   }catch(e){
     saveState('error', e.message);
@@ -609,6 +703,7 @@ async function flush(){
     if(pending){ pending=false; flush(); }
   }
 }
+
 /** Redraw from S without writing back. */
 function commitLocal(){ renderRail(); renderMap(); renderSummary(); }
 
@@ -705,7 +800,10 @@ async function enterApp(){
   // and the brand add/delete controls go away rather than failing on save.
   document.body.classList.toggle('scanner', !isAdmin());
 
-  await boot();
+  // Read the document, then ask which warehouse before anything is drawn.
+  await loadSaved();
+  const id = await chooseSite();
+  await openSite(id);
   if(first) first.click();
 }
 
@@ -9867,14 +9965,67 @@ document.querySelectorAll('.railnav button').forEach(b=>b.onclick=()=>{
   if(t==='users') renderUsers();
 });
 
+/** Ask which warehouse, unless there is only one. */
+function chooseSite(force){
+  const list=siteList();
+  const remembered=sessionStorage.getItem('wh-site');
+  // On sign-in with a single warehouse there is nothing to ask. Opening it
+  // from the top bar always shows the list, or a second one could never be
+  // added.
+  if(list.length===1 && !force) return Promise.resolve(list[0].id);
+  return new Promise(resolve=>{
+    document.querySelector('.app').classList.add('hidden');
+    const host=document.getElementById('sitepick');
+    host.classList.remove('hidden');
+    document.getElementById('sitelist').innerHTML = list.map(x=>{
+      const st=DOC.sites[x.id];
+      const slots=Object.values(st.racks||{}).reduce((a,b)=>a+Object.values(b).flat().length,0);
+      const pcs=Object.values(st.inv||{}).flat().reduce((a,l)=>a+(+l.qty||0),0);
+      return `<button class="sitebtn" data-site="${esc(x.id)}">
+        <span class="nm">${esc(x.name)}${x.id===remembered?' <span class="pill ok" style="font-weight:400">last used</span>':''}
+          <span class="sub">${slots.toLocaleString()} slots · ${pcs.toLocaleString()} pcs</span></span>
+        <span class="go">→</span></button>`;
+    }).join('') + (isAdmin()
+      ? `<button class="sitebtn" data-site="__new" style="border-style:dashed">
+           <span class="nm" style="color:var(--ink-2)">Add a warehouse
+           <span class="sub">an empty map of its own</span></span><span class="go">+</span></button>`
+      : '');
+
+    host.querySelectorAll('[data-site]').forEach(b=>b.onclick=()=>{
+      if(b.dataset.site==='__new'){
+        const name=prompt('Name of the new warehouse');
+        if(!name||!name.trim()) return;
+        const id=name.trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,24)
+          || 'site'+Date.now();
+        if(DOC.sites[id]) return alert('There is already a warehouse with that name.');
+        DOC.sites[id]=blankSite(name.trim());
+        host.classList.add('hidden');
+        resolve(id);
+        return;
+      }
+      host.classList.add('hidden');
+      resolve(b.dataset.site);
+    });
+  });
+}
+
+async function openSite(id){
+  SITE=id;
+  sessionStorage.setItem('wh-site',id);
+  S=projectSite(id);
+  const lbl=document.getElementById('sitelabel');
+  if(lbl) lbl.textContent=siteName(id);
+  document.querySelector('.app').classList.remove('hidden');
+  await boot();
+}
+
 async function boot(){
-  const saved=await loadSaved();
-  if(saved&&saved.racks) S={inv:{},locks:{},notes:{},kinds:{},labels:{},catLines:[],dispatches:[],orders:[],counts:[],...saved};
-  S.kinds=S.kinds||{}; S.labels=S.labels||{}; S.catLines=S.catLines||[]; S.dispatches=S.dispatches||[]; S.orders=S.orders||[]; S.counts=S.counts||[];
+  S.kinds=S.kinds||{}; S.labels=S.labels||{}; S.catLines=S.catLines||[];
+  S.dispatches=S.dispatches||[]; S.orders=S.orders||[]; S.counts=S.counts||[];
   applyOfficialColors();
   // Only an administrator may seed the rack sheets; a scanner's copy would be
   // reverted by the server anyway, so it is not attempted.
-  const added = isAdmin() ? seedSheets() : [];
+  const added = (isAdmin() && !DOC.sites[SITE]?.seeded) ? seedSheets() : [];
   if(added.length) save();
   active=S.brands[0]?.name||null;
   // Every rack starts locked at each sign-in. Editing the map is rare and
@@ -9895,6 +10046,14 @@ document.getElementById('gateGo').onclick=doSignIn;
   if(el) el.addEventListener('keydown',e=>{ if(e.key==='Enter') doSignIn(); });
 });
 document.getElementById('btnOut').onclick=()=>signOut();
+document.getElementById('sitebtn').onclick=async()=>{
+  // Anything unsent is written before leaving, or it would belong to the
+  // wrong warehouse when it finally lands.
+  if(document.getElementById('savestate').dataset.s==='dirty') await flush();
+  const id=await chooseSite(true);
+  await openSite(id);
+  document.querySelector('.railnav button[data-tab="map"]').click();
+};
 document.getElementById('btnPass').onclick=changeOwnPassword;
 
 async function changeOwnPassword(){
