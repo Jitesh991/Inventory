@@ -9820,7 +9820,64 @@ function renderSummary(){
 /* ============================================================
    Rack setup
    ============================================================ */
-let entryOpen=false;
+let entryOpen=false, slotsOpen=false;
+
+/**
+ * Build a rack layout from a pasted list of locations.
+ *
+ * Creating 400-odd slots a click at a time is not a reasonable ask, and the
+ * brand importer cannot do it because a new warehouse has no brands assigned
+ * yet. This takes the location codes alone.
+ */
+function applySlotList(dryRun){
+  const raw=$('#slots-text').value || '';
+  const log=$('#slots-log');
+  const codes=raw.toUpperCase().split(/[^A-Z0-9.]+/).filter(Boolean);
+  if(!codes.length){ log.innerHTML='<div class="note warn">Nothing pasted yet.</div>'; return; }
+
+  const good=[], bad=[], seen=new Set();
+  codes.forEach(code=>{
+    const m=code.match(/^([A-Z]{1,3})(\d{1,2})\.(\d{1,2})$/);
+    if(!m){ bad.push(code); return; }
+    if(seen.has(code)) return;
+    seen.add(code);
+    good.push({code, rack:m[1], bay:m[2], layer:+m[3]});
+  });
+
+  const locked=[...new Set(good.filter(g=>isLocked(g.rack)).map(g=>g.rack))];
+  const exists=g=>(S.racks[g.rack]?.[g.bay]||[]).includes(g.layer);
+  const already=good.filter(exists);
+  const toMake=good.filter(g=>!exists(g)&&!isLocked(g.rack));
+  const newRacks=[...new Set(toMake.map(g=>g.rack))].filter(r=>!S.racks[r]);
+
+  log.innerHTML=`
+    ${bad.length?`<div class="note bad">${bad.length} line${bad.length===1?'':'s'} not understood:
+      ${esc(bad.slice(0,8).join(', '))}${bad.length>8?'…':''}. Expected something like A1.2.</div>`:''}
+    ${locked.length?`<div class="note warn">Skipping locked rack${locked.length===1?'':'s'}
+      ${esc(locked.join(', '))} — unlock on the map first.</div>`:''}
+    <div class="stats">
+      <div><span>Read</span><strong>${good.length}</strong></div>
+      <div><span>To create</span><strong>${toMake.length}</strong></div>
+      <div><span>Already there</span><strong>${already.length}</strong></div>
+      <div><span>New racks</span><strong>${newRacks.length}</strong></div>
+    </div>
+    ${newRacks.length?`<p class="lead" style="margin:0">New racks: <span class="mono">${
+      esc(newRacks.join(', '))}</span></p>`:''}
+    ${dryRun?'<div class="note">Nothing created yet — this is the check.</div>':''}`;
+
+  if(dryRun || !toMake.length) return;
+
+  toMake.forEach(g=>{
+    S.racks[g.rack]=S.racks[g.rack]||{};
+    S.racks[g.rack][g.bay]=[...new Set([...(S.racks[g.rack][g.bay]||[]),g.layer])]
+      .sort((a,b)=>a-b);
+  });
+  // A rack built this way starts unlocked, or the next step would be blocked.
+  newRacks.forEach(r=>{ S.locks[r]=false; });
+  commit();
+  renderRacks(); renderMap(); renderRail();
+  toast(`${toMake.length} slot${toMake.length===1?'':'s'} created`);
+}
 function renderRacks(){
   const rs=Object.keys(S.racks).sort(sortRacks);
   $('#p-racks').innerHTML=`
@@ -9837,6 +9894,27 @@ function renderRacks(){
     </div>
     <p class="mini" style="color:var(--ink-2)">Creating a rack that already exists extends it — existing slots and brands stay put.</p>
   </div>
+  <div class="card" style="padding-top:16px;padding-bottom:16px">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Add slots in bulk</h3>
+      <span style="font-size:12.5px;color:var(--ink-2)">Paste a list of locations to build a layout.</span>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="slots-toggle">${slotsOpen?'Close':'Open'}</button>
+    </div>
+    <div id="slots-wrap" class="${slotsOpen?'':'hidden'}" style="margin-top:16px">
+      <p class="lead" style="margin:0 0 10px">One location per line, or separated by commas or
+      spaces — <span class="mono">A1.2</span>, <span class="mono">Q10.4</span>. Racks and bays are
+      created as needed. Nothing is removed, and a slot that already exists is left alone.</p>
+      <textarea id="slots-text" rows="6" placeholder="A1.2&#10;A1.3&#10;A1.4&#10;A2.1"
+        style="width:100%;font-family:var(--mono);font-size:12.5px"></textarea>
+      <div class="row">
+        <button class="btn ghost" id="slots-check">Check</button>
+        <button class="btn" id="slots-apply">Create the slots</button>
+      </div>
+      <div id="slots-log"></div>
+    </div>
+  </div>
+
   <div class="card" style="padding-top:16px;padding-bottom:16px">
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <h3 style="margin:0">Bulk assign brands to slots</h3>
@@ -9857,6 +9935,14 @@ function renderRacks(){
       <td style="text-align:right"><button class="btn ghost" data-del="${r}" style="padding:3px 9px"${isLocked(r)?' disabled':''}>Delete</button></td></tr>`;}).join('')}
     </tbody></table>`:'<p class="lead" style="margin:0">No racks yet.</p>'}
   </div>`;
+
+  $('#slots-toggle').onclick=()=>{
+    slotsOpen=!slotsOpen;
+    $('#slots-wrap').classList.toggle('hidden',!slotsOpen);
+    $('#slots-toggle').textContent=slotsOpen?'Close':'Open';
+  };
+  $('#slots-check').onclick=()=>applySlotList(true);
+  $('#slots-apply').onclick=()=>applySlotList(false);
 
   $('#entry-toggle').onclick=()=>{
     entryOpen=!entryOpen;
