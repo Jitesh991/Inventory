@@ -630,11 +630,17 @@ const blankSite = name => ({ name, seeded:true, racks:{}, assign:{}, inv:{}, loc
 
 /** Turn whatever is stored into the multi-site shape, once. */
 function toMultiSite(doc){
-  if(doc && doc.sites) return doc;
+  if(doc && doc.sites){
+    // A store migrated before the warehouse had its real name.
+    if(doc.sites.main && doc.sites.main.name==='Main warehouse') doc.sites.main.name='Bormaheco';
+    return doc;
+  }
   // A single-warehouse document from before: move it under its own site so
   // nothing is lost and nobody has to re-enter anything.
   const old = doc || {};
-  const site = blankSite('Main warehouse');
+  // The original warehouse is Bormaheco; "Main warehouse" was only ever a
+  // placeholder from the migration, so it is named properly here.
+  const site = blankSite('Bormaheco');
   // The original warehouse still gets its transcribed rack sheets; only a
   // warehouse added later starts deliberately empty.
   delete site.seeded;
@@ -9884,6 +9890,33 @@ function renderRacks(){
   <h2>Rack setup</h2>
   <p class="lead">A rack is a row of bays, each bay up to four layers. Layer 1 is the floor, layer 4 the top.
   To knock out a single slot — a bridge gap, a missing beam — switch the tool to <b>Slots</b> on the map and click the cell.</p>
+  ${isAdmin()?`<div class="card">
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Warehouses</h3>
+      <span style="font-size:12.5px;color:var(--ink-2)">Each keeps its own map and stock. Products and brands are shared.</span>
+      <span style="flex:1"></span>
+      <button class="btn quiet" id="wh-add">Add a warehouse</button>
+    </div>
+    <table style="margin-top:12px"><thead><tr><th>Name</th><th class="num">Racks</th>
+      <th class="num">Slots</th><th class="num">Pieces</th><th></th></tr></thead>
+    <tbody>${siteList().map(x=>{
+      const st=DOC.sites[x.id];
+      const racks=Object.keys(st.racks||{}).length;
+      const slots=Object.values(st.racks||{}).reduce((a,b)=>a+Object.values(b).flat().length,0);
+      const pcs=Object.values(st.inv||{}).flat().reduce((a,l)=>a+(+l.qty||0),0);
+      return `<tr>
+        <td><strong>${esc(x.name)}</strong>${x.id===SITE?' <span class="pill ok">open now</span>':''}
+          <div class="mono" style="font-size:10.5px;color:var(--ink-3)">${esc(x.id)}</div></td>
+        <td class="num">${racks}</td><td class="num">${slots.toLocaleString()}</td>
+        <td class="num">${pcs.toLocaleString()}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="btn ghost" data-whren="${esc(x.id)}" style="padding:2px 9px">Rename</button>
+          ${x.id===SITE?'':`<button class="btn quiet" data-whopen="${esc(x.id)}" style="padding:2px 9px">Open</button>`}
+        </td></tr>`;}).join('')}</tbody></table>
+    <p class="mini" style="color:var(--ink-2)">Renaming is cosmetic — the short code underneath each
+    name is what the stored data uses, so nothing moves or breaks.</p>
+  </div>`:''}
+
   <div class="card">
     <h3>Add or resize</h3>
     <div class="row" style="margin:0">
@@ -9942,6 +9975,36 @@ function renderRacks(){
       <td style="text-align:right"><button class="btn ghost" data-del="${r}" style="padding:3px 9px"${isLocked(r)?' disabled':''}>Delete</button></td></tr>`;}).join('')}
     </tbody></table>`:'<p class="lead" style="margin:0">No racks yet.</p>'}
   </div>`;
+
+  $('#p-racks').querySelectorAll('[data-whren]').forEach(b=>b.onclick=()=>{
+    const id=b.dataset.whren;
+    const next=prompt('Name for this warehouse', siteName(id));
+    if(next===null) return;
+    const name=next.trim();
+    if(!name) return;
+    // The id is what everything is stored against, so only the label changes.
+    DOC.sites[id].name=name;
+    if(id===SITE){ const l=$('#sitelabel'); if(l) l.textContent=name; }
+    commit(); renderRacks();
+    toast(`Renamed to ${name}`);
+  });
+  $('#p-racks').querySelectorAll('[data-whopen]').forEach(b=>b.onclick=async()=>{
+    if($('#savestate').dataset.s==='dirty') await flush();
+    await openSite(b.dataset.whopen);
+    document.querySelector('.railnav button[data-tab="map"]').click();
+  });
+  const whAdd=$('#wh-add');
+  if(whAdd) whAdd.onclick=async()=>{
+    const name=prompt('Name of the new warehouse');
+    if(!name||!name.trim()) return;
+    const id=name.trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,24)||'site'+Date.now();
+    if(DOC.sites[id]) return alert('There is already a warehouse with that name.');
+    DOC.sites[id]=blankSite(name.trim());
+    if($('#savestate').dataset.s==='dirty') await flush();
+    await openSite(id);
+    renderRacks();
+    toast(`${name.trim()} created — add its slots below`);
+  };
 
   $('#slots-toggle').onclick=()=>{
     slotsOpen=!slotsOpen;
