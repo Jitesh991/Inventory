@@ -9905,6 +9905,13 @@ function renderRacks(){
       <p class="lead" style="margin:0 0 10px">One location per line, or separated by commas or
       spaces — <span class="mono">A1.2</span>, <span class="mono">Q10.4</span>. Racks and bays are
       created as needed. Nothing is removed, and a slot that already exists is left alone.</p>
+      <div class="row" style="margin-top:0;margin-bottom:10px">
+        <div style="flex:1;min-width:230px">
+          <label style="display:block;font-size:12.5px;font-weight:500;color:var(--ink-2);margin-bottom:5px">Upload a list (.txt or .csv)</label>
+          <input type="file" id="slots-file" accept=".txt,.csv,.text" style="width:100%">
+        </div>
+        <span style="align-self:flex-end;padding-bottom:9px;color:var(--ink-3);font-size:12.5px">or paste below</span>
+      </div>
       <textarea id="slots-text" rows="6" placeholder="A1.2&#10;A1.3&#10;A1.4&#10;A2.1"
         style="width:100%;font-family:var(--mono);font-size:12.5px"></textarea>
       <div class="row">
@@ -9940,6 +9947,20 @@ function renderRacks(){
     slotsOpen=!slotsOpen;
     $('#slots-wrap').classList.toggle('hidden',!slotsOpen);
     $('#slots-toggle').textContent=slotsOpen?'Close':'Open';
+  };
+  // A plain list of codes, so the file only needs reading as text — no
+  // spreadsheet parsing and no header row to get wrong.
+  $('#slots-file').onchange=e=>{
+    const f=e.target.files[0];
+    if(!f) return;
+    const rd=new FileReader();
+    rd.onload=()=>{
+      $('#slots-text').value=rd.result;
+      applySlotList(true);
+    };
+    rd.onerror=()=>{ $('#slots-log').innerHTML=
+      '<div class="note bad">Could not read that file.</div>'; };
+    rd.readAsText(f);
   };
   $('#slots-check').onclick=()=>applySlotList(true);
   $('#slots-apply').onclick=()=>applySlotList(false);
